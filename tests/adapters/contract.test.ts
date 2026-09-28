@@ -5,6 +5,11 @@ import { createAdapterContext, getAdapter, knownSiteTypes, listAdapters, require
 import { BooruError } from '../../src/shared/errors.js';
 import { DEFAULT_SETTINGS } from '../../src/shared/types.js';
 import { createServerConfig } from '../../src/core/servers.js';
+import { redactUrl } from '../../src/shared/util.js';
+
+/** Post ids are opaque per site; Kemono/Coomer use `service/creator/post` composites. */
+const SAMPLE_POST_ID: Record<string, string> = { kemono: 'patreon/90822862/147648418', coomer: 'onlyfans/demo/123', pawchive: 'fanbox/1245946/12674481' };
+const samplePostId = (siteType: string) => SAMPLE_POST_ID[siteType] ?? '123';
 
 registerBuiltinAdapters();
 
@@ -18,8 +23,10 @@ const settings = DEFAULT_SETTINGS;
 describe('adapter contract conformance', () => {
   const adapters = listAdapters();
 
-  it('registers the three initial site types', () => {
-    expect(knownSiteTypes()).toEqual(expect.arrayContaining(['e621', 'danbooru', 'gelbooru']));
+  it('registers the three original site types plus the added families', () => {
+    expect(knownSiteTypes()).toEqual(
+      expect.arrayContaining(['e621', 'danbooru', 'gelbooru', 'rule34', 'safebooru-org', 'yandere', 'konachan', 'derpibooru', 'hydrus', 'kemono']),
+    );
   });
 
   it.each(adapters.map((adapter) => [adapter.siteType, adapter] as const))('%s declares complete capabilities', (_siteType, adapter) => {
@@ -47,10 +54,10 @@ describe('adapter contract conformance', () => {
     });
     const ctx = createAdapterContext(adapter, server, settings);
     const search = adapter.buildSearchRequest(ctx, { tags: 'cat', limit: 5, page: 1 });
-    const post = adapter.buildPostRequest(ctx, '123');
+    const post = adapter.buildPostRequest(ctx, samplePostId(adapter.siteType));
 
     for (const spec of [search, post]) {
-      expect(spec.url.startsWith('https://')).toBe(true);
+      expect(spec.url).toMatch(/^https?:\/\//);
       expect(new URL(spec.url).host.length).toBeGreaterThan(0);
       expect(spec.method ?? 'GET').toBe('GET');
     }
@@ -69,9 +76,8 @@ describe('adapter contract conformance', () => {
     });
     const ctx = createAdapterContext(adapter, server, settings);
     const spec = adapter.buildSearchRequest(ctx, { tags: 'cat' });
-    const redacted = new URL(spec.url);
-    if (redacted.searchParams.has('api_key')) redacted.searchParams.set('api_key', '***');
-    expect(redacted.toString()).not.toContain('super-secret-key');
+    expect(redactUrl(spec.url)).not.toContain('super-secret-key');
+    for (const probe of adapter.buildValidationProbes(ctx)) expect(redactUrl(probe.request.url)).not.toContain('super-secret-key');
   });
 
   it.each(adapters.map((adapter) => [adapter.siteType, adapter] as const))('%s declares validation probes', (_siteType, adapter) => {
@@ -87,12 +93,19 @@ describe('adapter contract conformance', () => {
     expect(probes.some((probe) => probe.purpose === 'endpoint')).toBe(true);
     for (const probe of probes) {
       expect(probe.id.length).toBeGreaterThan(0);
-      expect(probe.request.url.startsWith('https://')).toBe(true);
+      expect(probe.request.url).toMatch(/^https?:\/\//);
       expect(typeof probe.interpret).toBe('function');
     }
   });
 
   it.each(adapters.map((adapter) => [adapter.siteType, adapter] as const))('%s maps every site rating token to a canonical rating', (_siteType, adapter) => {
+    if (!adapter.capabilities.supportsRatingFilter) {
+      // Sites without ratings (Hydrus, Kemono) must say so and stay inert.
+      expect(adapter.siteRatingTokens).toHaveLength(0);
+      expect(adapter.ratingQueryTags([]).tags).toHaveLength(0);
+      expect(adapter.normalizeRating('anything')).toBe('unknown');
+      return;
+    }
     expect(adapter.siteRatingTokens.length).toBeGreaterThan(0);
     for (const token of adapter.siteRatingTokens) {
       expect(adapter.canonicalRatingFor(token)).toBeTruthy();
@@ -108,7 +121,8 @@ describe('adapter contract conformance', () => {
     const all = adapter.ratingQueryTags(['general', 'safe', 'sensitive', 'questionable', 'explicit']);
     expect(all.tags).toHaveLength(0);
 
-    for (const tag of none.tags) expect(tag.startsWith('-rating:')).toBe(true);
+    // Exclusions are `-rating:x` on most sites; Philomena ratings are plain tags (`-explicit`).
+    for (const tag of none.tags) expect(tag.startsWith('-')).toBe(true);
   });
 
   it.each(adapters.map((adapter) => [adapter.siteType, adapter] as const))('%s exposes credential fields covering the UI schema', (_siteType, adapter) => {

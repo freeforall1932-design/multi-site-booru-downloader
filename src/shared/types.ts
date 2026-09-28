@@ -10,7 +10,31 @@
 /** Site types are plain strings so that new booru-like sites need no type churn. */
 export type SiteType = string;
 
-export const KNOWN_SITE_TYPES = ['e621', 'danbooru', 'gelbooru'] as const;
+export const KNOWN_SITE_TYPES = [
+  'e621',
+  'danbooru',
+  'gelbooru',
+  // Gelbooru 0.1.11 forks
+  'rule34',
+  'safebooru-org',
+  'xbooru',
+  'tbib',
+  'hypnohub',
+  'realbooru',
+  // Moebooru
+  'yandere',
+  'konachan',
+  // Philomena
+  'derpibooru',
+  'furbooru',
+  'ponybooru',
+  // Local client
+  'hydrus',
+  // Creator archives
+  'kemono',
+  'coomer',
+  'pawchive',
+] as const;
 export type KnownSiteType = (typeof KNOWN_SITE_TYPES)[number];
 
 /** Site-agnostic rating vocabulary used by the shared layer. */

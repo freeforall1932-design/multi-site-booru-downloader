@@ -448,7 +448,7 @@ describe('router - queue and settings surface', () => {
     const info = await ok<any>(harness, { type: 'diagnostics/info' });
     expect(info.version).toBe('test');
     expect(info.environment).toBe('extension');
-    expect(info.adapters.map((entry: any) => entry.siteType).sort()).toEqual(['danbooru', 'e621', 'gelbooru']);
+    expect(info.adapters.map((entry: any) => entry.siteType).sort()).toEqual(expect.arrayContaining(['danbooru', 'e621', 'gelbooru']));
     expect(info.servers[0].hasApiKey).toBe(true);
     const serialized = JSON.stringify(info);
     expect(serialized).not.toContain('e621-demo-key');

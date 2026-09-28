@@ -128,6 +128,8 @@ const SECRET_KEYS = [
   'access_token',
   'token',
   '_client',
+  // Hydrus Client API accepts the access key as a query parameter of this name.
+  'Hydrus-Client-API-Access-Key',
 ];
 
 export function redactUrl(raw: string): string {
