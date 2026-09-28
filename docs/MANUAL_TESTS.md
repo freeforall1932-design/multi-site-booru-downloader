@@ -1,11 +1,14 @@
 # Manual test plan
 
-The automated suite (223 tests) covers the adapters, the shared services and the
-message protocol. This document covers what only a human can check: the real
-extension in a real browser, the UI states, and the failure messages a user sees.
+The automated suite (270 tests) covers the adapters, the shared services, the
+panel's shared logic and the message protocol. This document covers what only a
+human can check: the real extension in a real browser, the UI states, and the
+failure messages a user sees.
 
 Legend: **[V]** = can also be exercised in the offline preview harness
-(`npm run preview`) without touching a live site.
+(`npm run preview`) without touching a live site. **[P]** = panel-specific; the
+harness embeds the panel at a realistic 380 px with mock data, so it is the
+quickest way to see it before installing.
 
 ---
 
@@ -13,10 +16,12 @@ Legend: **[V]** = can also be exercised in the offline preview harness
 
 1. `npm run verify` — type checks, build and tests must all pass.
 2. `chrome://extensions` → *Developer mode* → **Load unpacked** → pick `dist/`.
-3. Click the toolbar icon → **Manager** (or right-click the icon → *Options*).
-   The options page opens on the **Servers** tab.
+3. Click the toolbar icon → the **side panel** opens (`uiMode: sidepanel`).
+   The full manager is still one click away: right-click the icon → *Options*, or
+   the panel's *Servers* tab, or *Open side panel* in the options rail.
 4. Optional: `npm run preview` → open <http://localhost:4173> for the harness
-   (real UI in iframes, mock booru APIs, demo credentials on the page).
+   (real UI in iframes, mock booru APIs, demo credentials on the page, buttons to
+   switch the panel's simulated active tab).
 
 Test profiles you may want, in the order that makes later tests easy:
 
@@ -29,7 +34,50 @@ Test profiles you may want, in the order that makes later tests easy:
 
 ---
 
-## 1. Preview harness [V]
+## 1. Side panel [P]
+
+`[P]` = do this in the real browser (load `dist/` unpacked); the preview harness
+covers the same flow with mock data.
+
+1. Click the toolbar icon → the **side panel** opens next to the page. Status pill
+   reads *Ready*; the tab strip shows Browse · Queue · Servers · Settings.
+2. **Context card.** Open `https://e621.net/posts/<id>` (or a mock URL in the
+   harness) → the card names the matching profile and its route (`post #12345`).
+   Press ⟳ with a non-booru tab active → the card says the page is not a supported
+   booru, and the search box still works.
+3. **Post card.** On a post page the card shows a thumbnail, rating chip and size,
+   with *Download this post* / *Add to list*. After a download the row shows a
+   `saved …` badge; after *Add to list* the button becomes *In the queue*.
+4. **Listing.** Type `cityscape` and press *List this page* → rows appear in the
+   list below, all ticked, and the dock button reads *Download selected (n)*. The
+   hint says how many rows were added and how many were skipped.
+5. **Page ranges.** Switch to *advanced*, enter `2,4` and press *Fetch selected
+   pages* → the progress bar walks both pages. Enter `abc` → the hint turns red and
+   *Fetch selected pages* is disabled. Enter `1-9999` with *Pages per fetch* = 150 →
+   the message explains the cap.
+6. **Filters.** Set *Media* to *Videos only* → pictures disappear from the list.
+   Untick *Skip downloaded*, re-run a search you already downloaded → rows come
+   back with a `saved` badge instead of being omitted.
+7. **Selective run.** Untick one row, press *Download selected (n)* → only the
+   ticked rows run; the unticked row stays `queued`. Press *Start queued (1)* on
+   the dock → it downloads too.
+8. **Dock controls.** Change *Downloads at once* → the setting persists (Settings →
+   *Downloads at once* matches). Switch *Quality* to *Sample* → the next download
+   uses the sample URL when the post has one.
+9. **Row actions.** ✕ on a queued row removes it from the list (the file on disk is
+   untouched); ✕ on a running row cancels just that download. *Retry failed*,
+   *Clear finished*, *Reset history* and *Clear list* each report what they did.
+10. **Settings tab.** Every section has a heading and a hint. Change *Theme* → the
+    panel switches immediately. Tick `{artist}` in the template editor → the
+    *Example* line updates. Clear the file-name box and type `post-{id}` → the
+    *custom template* warning appears and the value is kept.
+11. **Toolbar mode.** Settings → *Toolbar click opens* → *Popup*. Click the toolbar
+    icon → the popup opens. Reload the extension → the popup is still the target
+    (the worker re-applies the stored choice). Switch back to the panel.
+12. **Deep links.** Open `panel.html#queue` (or use the harness button) → the panel
+    opens on the Queue tab; `#settings` likewise.
+
+## 1a. Preview harness [V]
 
 | # | Steps | Expected |
 | --- | --- | --- |
@@ -142,6 +190,13 @@ Form behaviour:
 
 ## 7. Settings [V]
 
+The options page and the panel's Settings tab render the same sections; check one
+of each area rather than all of them twice: *Global behaviour* (toolbar mode),
+*Multiple download* (concurrency, spacing, retries, duplicates), *List results*
+(media filter, page cap, queue rows, skip downloaded), *Search behaviour* (suffix,
+blacklist, search history), *Name template* (checkboxes + custom + preview),
+*Interface*, *Advanced behaviour*, *Server credentials*, *Download history*.
+
 | # | Steps | Expected |
 | --- | --- | --- |
 | 7.1 | Change templates/concurrency | **Save settings** persists; reopening the page keeps them |
@@ -166,6 +221,10 @@ Form behaviour:
 | 8.5 | Custom/fork host without host permission | Diagnostics shows the granted/permission-needed state, with a **Grant access** action |
 
 ## 9. Popup and page flow (real browser)
+
+The popup's *Panel* button opens the docked panel (`chrome.sidePanel.open`, which
+needs the click as its user gesture); on a browser without the sidePanel API the
+button falls back to the options page.
 
 | # | Steps | Expected |
 | --- | --- | --- |

@@ -1,13 +1,22 @@
 # Worklist / status
 
 Status of the product scope, what is verified, and what is deliberately left for
-later. Last updated for `0.1.0`.
+later. Last updated for `0.2.0` (side panel release).
 
 ## Delivered
 
 | Deliverable | Status | Where |
 | --- | --- | --- |
 | Working extension skeleton (MV3, TypeScript, no bundler) | ✅ | `src/manifest.json`, `scripts/build.mjs` → `dist/` |
+| **Side panel as the primary surface** (Browse · Queue · Servers · Settings, deep links, dock) | ✅ | `src/panel/`, `src/ui/panel-*.ts`, [docs/SIDEPANEL.md](SIDEPANEL.md) |
+| Toolbar mode switch (side panel vs popup) applied from settings by the worker | ✅ | `src/background/service-worker.ts` (`applyUiMode`), `settings.uiMode` |
+| Active-tab detection + "this post" card in the panel | ✅ | `src/ui/panel-context.ts`, `routes/detect`, `posts/get` |
+| Listing card: tag search with suggestions, page ranges (`2,4,6-10`, `50-`, `all`), crawl cap, progress, media filter | ✅ | `src/ui/panel-listing.ts`, `src/core/pages.ts` |
+| Review-then-download rows: a row *is* a persisted queue item, ticked selection, selective runs | ✅ | `src/ui/panel-queue.ts`, `queue/run { itemIds }`, `queue/remove` |
+| Settings in the NHentai-Downloader section style (heading + hint per option, template checkbox editor, live preview) | ✅ | `src/ui/settings-sections.ts`, `src/core/template.ts` |
+| Download history ("skip downloaded", `saved` badges) + remembered searches | ✅ | `src/core/history.ts`, `bsm.history`, `bsm.searches` |
+| Shared tag blacklist and "always append these tags" applied to every search | ✅ | `src/core/search.ts`, router `browse/search`, adapter `composeTags` |
+| Quality (original vs sample rendition) and duplicate behaviour on the dock/settings | ✅ | `settings.filePreference`, `settings.duplicateBehaviour`, queue + router download paths |
 | Multi-server / multi-account manager with mobile-style server list | ✅ | `src/ui/server-list.ts`, `src/options/options.ts` (`#servers`) |
 | Add/edit screen with per-site fields, validate-client, save | ✅ | `src/ui/server-form.ts`, `src/core/validation.ts` |
 | **e621 adapter** (first target) | ✅ | `src/adapters/e621.ts` |
@@ -19,17 +28,19 @@ later. Last updated for `0.1.0`.
 | Popup + content-script download button | ✅ | `src/popup/popup.ts`, `src/content/post-button.ts` |
 | Diagnostics + credential-free traces | ✅ | `src/ui/diagnostics-view.ts`, `src/core/router.ts` |
 | Offline preview harness + mock booru | ✅ | `dev/preview/`, `src/preview/`, `scripts/preview-server.mjs` |
-| Tests for adapters and shared logic | ✅ | `tests/` — 223 tests, all passing |
+| Tests for adapters and shared logic | ✅ | `tests/` — 270 tests, all passing (incl. panel page/query/template/history logic) |
 | Docs | ✅ | `README.md`, `docs/{ARCHITECTURE,ADAPTER_CONTRACT,SECURITY,MANUAL_TESTS,WORKLIST}.md` |
 
 ### Verification snapshot
 
 ```
 npm run typecheck   → clean (src + tests, strict TS, noUncheckedIndexedAccess)
-npm test            → 223 passed (10 files)
+npm test            → 270 passed (12 files)
 npm run build       → dist/ with manifest, 4 icons, build-info.json
-npm run smoke       → 30/30 checks against the built dist/ bundle
-npm run preview     → harness + options/popup served on :4173
+npm run smoke       → 76/76 checks against the built dist/ bundle (incl. booting
+                      the built panel bundle, driving a query through it, walking
+                      all four panel tabs, and booting the options bundle)
+npm run preview     → harness + side panel/options/popup served on :4173
 ```
 
 | Suite | Tests | Focus |
@@ -44,11 +55,28 @@ npm run preview     → harness + options/popup served on :4173
 | `tests/core/queue.test.ts` | 13 | dedupe, rating enforcement, failures, pause/retry/clear, persistence |
 | `tests/core/http.test.ts` | 26 | rate limiter, retries, abort, redaction, JSON/HTML/empty bodies |
 | `tests/core/router.test.ts` | 35 | entire message protocol end-to-end against the mock APIs |
+| `tests/core/panel-core.test.ts` | 35 | page ranges, query composition, template editor, history notebooks, panel settings keys |
+| `tests/core/panel-router.test.ts` | 12 | selective runs, row removal, history/search messages, blacklist + suffix, sample/overwrite preferences |
 
 All tests run offline against `src/preview/mock-booru.ts`; no live site is contacted
 by the suite. Live behaviour is covered by `docs/MANUAL_TESTS.md`.
 
 ## Behaviour notes worth knowing
+
+- **The panel's row list *is* `bsm.queue`.** A row is a persisted `QueueItem`, so
+  closing the panel (or restarting the worker) never loses work; ticking rows only
+  decides *which pending items a run may touch* (`queue/run { itemIds }`).
+- **Fetching never downloads.** A fetch calls `queue/enqueuePosts` only; the queue
+  starts when the dock button (or the content-script button on a post page) asks
+  for a run. `settings.autoStartQueue` only controls whether "Download selected"
+  also starts the run.
+- **Newly listed rows arrive ticked**, and a row you untick stays unticked across
+  refreshes (selection is reconciled against a snapshot of pending ids).
+- **The tag blacklist is applied in the router**, once, for every surface; the
+  *global suffix* is applied by the adapters (which also de-duplicate it against
+  your own tags), so neither is ever added twice.
+- **`filePreference: 'sample'`** falls back to the original file whenever the site
+  reports no sample, so a download never fails because of a quality preference.
 
 - **Exactly one default** profile always exists once at least one server is saved
   (first save wins, deleting the default promotes the next row).
@@ -83,17 +111,22 @@ by the suite. Live behaviour is covered by `docs/MANUAL_TESTS.md`.
 
 ## Next steps (suggested order)
 
-1. **Zip packaging + CI**: build artifact upload, `npm run verify` as a workflow,
-   and a version-bump script.
-2. **Exclude the preview modules from release builds** (build flag) and ship a
+1. **Download-integrity pass**: stream `chrome.downloads.onChanged` byte counts
+   into `bsm.queue` so rows show real progress, then compare size/md5 when the site
+   reports a hash and flag mismatches in the row.
+2. **Archive picture packing** (ZIP/CBZ/PDF per post, offscreen document) as an
+   optional output mode in the panel's settings, mirroring the Rule 34 picture
+   modes.
+3. **Tag autocomplete + favourites/history browsing** using the sites' tag and
+   favourites endpoints, behind the existing capability flags (Anime Boxes parity).
+4. **Zip packaging + CI**: build artifact upload, `npm run verify` as a workflow,
+   a version-bump script.
+5. **Exclude the preview modules from release builds** (build flag) and ship a
    `dist-preview` variant for the harness.
-3. **Pool/favourites browsing** for e621/Danbooru (adapters already recognise the
+6. **Pool/favourites browsing** for e621/Danbooru (adapters already recognise the
    routes; the UI needs a second listing mode).
-4. **Download integrity**: compare the saved file's size/md5 against the post when
-   the site reports it; surface mismatches in the queue.
-5. **Tag autocomplete** using the sites' tag endpoints, behind the existing
-   capability flag.
-6. **More adapters**: register common DAPI forks via `createGelbooruLikeAdapter`
+7. **More adapters**: register common DAPI forks via `createGelbooruLikeAdapter`
    and add a first-class adapter for a Danbooru-style instance to validate that the
    contract scales beyond the three targets.
-7. **Firefox/Manifest parity pass** if a second browser target is required.
+8. **Firefox/Manifest parity pass** if a second browser target is required
+   (the side panel has no Firefox equivalent, so the popup fallback earns its keep).
