@@ -3,6 +3,26 @@
 
 const optionsFrame = document.getElementById('options-frame');
 const popupFrame = document.getElementById('popup-frame');
+const panelFrame = document.getElementById('panel-frame');
+
+/**
+ * The panel reads the "active tab" from its own `?tab=` query string in preview
+ * mode, so switching that parameter is the preview's way of simulating "the user
+ * is looking at a different page".
+ */
+function openPanelAs(url, hash) {
+  const suffix = url ? `?tab=${encodeURIComponent(url)}` : '';
+  const target = `../../dist/panel/panel.html${suffix}${hash ?? ''}`;
+  if (panelFrame) {
+    panelFrame.src = target;
+    panelFrame.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } else {
+    window.open(target, '_blank', 'noopener');
+  }
+}
+
+document.getElementById('open-panel')?.addEventListener('click', () => openPanelAs('https://e621.net/posts/1500000'));
+document.getElementById('open-panel-queue')?.addEventListener('click', () => openPanelAs('https://e621.net/posts?tags=cat', '#queue'));
 
 document.getElementById('open-options')?.addEventListener('click', () => {
   window.open('../../dist/options/options.html', '_blank', 'noopener');
@@ -20,5 +40,6 @@ document.getElementById('reset')?.addEventListener('click', () => {
     .forEach((key) => localStorage.removeItem(key));
   optionsFrame?.contentWindow?.location.reload();
   popupFrame?.contentWindow?.location.reload();
+  panelFrame?.contentWindow?.location.reload();
   window.location.reload();
 });

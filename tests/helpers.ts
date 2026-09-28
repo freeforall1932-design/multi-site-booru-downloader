@@ -1,5 +1,6 @@
 import { registerBuiltinAdapters } from '../src/adapters/index.js';
 import { BooruClient } from '../src/core/client.js';
+import { DownloadHistoryStore, SearchHistoryStore } from '../src/core/history.js';
 import { DownloadQueue } from '../src/core/queue.js';
 import { ServerStore } from '../src/core/servers.js';
 import { SettingsStore } from '../src/core/settings.js';
@@ -33,8 +34,21 @@ export function createHarness(options: TestHarnessOptions = {}) {
   const validation = new ValidationService(http);
   const client = new BooruClient({ servers, settings, http, validation });
   const downloader = new RecordingDownloader();
-  const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader });
-  const router = createRouter({ client, queue, servers, settings, downloader, environment: 'extension', version: 'test' });
+  const history = new DownloadHistoryStore(area);
+  const searches = new SearchHistoryStore(area);
+  const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history });
+  const router = createRouter({
+    client,
+    queue,
+    servers,
+    settings,
+    downloader,
+    storage: area,
+    history,
+    searches,
+    environment: 'extension',
+    version: 'test',
+  });
 
   /** Seed storage: accepts inline servers/settings, else uses the factory options. */
   const seed = async (overrides: TestHarnessOptions = {}) => {
@@ -43,7 +57,7 @@ export function createHarness(options: TestHarnessOptions = {}) {
     if (settingsOverrides) await settings.save(settingsOverrides);
   };
 
-  return { area, settings, servers, http, validation, client, downloader, queue, router, seed };
+  return { area, settings, servers, http, validation, client, downloader, queue, history, searches, router, seed };
 }
 
 export function e621Server(overrides: Partial<ServerConfig> = {}): ServerConfig {

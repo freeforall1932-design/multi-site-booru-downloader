@@ -67,6 +67,11 @@
         padding-left: 18px;
       }
 
+      #panel-frame {
+        height: 760px;
+        width: 100%;
+      }
+
       code.inline {
         background: var(--bg-input);
         border: 1px solid var(--border);
@@ -88,6 +93,8 @@
           </p>
         </div>
         <div class="header-actions">
+          <button type="button" class="btn btn-primary" id="open-panel">Open side panel</button>
+          <button type="button" class="btn" id="open-panel-queue">Panel · queue tab</button>
           <button type="button" class="btn" id="open-options">Open options page</button>
           <button type="button" class="btn" id="open-popup">Open popup</button>
           <button type="button" class="btn btn-danger" id="reset">Reset preview data</button>
@@ -127,6 +134,19 @@
       </div>
 
       <div class="panels" style="margin-top: 14px">
+        <div class="frame">
+          <div class="frame-head">
+            <strong>Side panel (the toolbar surface: Browse · Queue · Servers · Settings)</strong>
+            <span class="muted small">docked at 380 px — what Chrome shows next to the page</span>
+          </div>
+          <iframe
+            id="panel-frame"
+            style="max-width: 380px"
+            src="/dist/panel/panel.html?tab=https%3A%2F%2Fe621.net%2Fposts%2F1500000"
+            title="Side panel preview"
+          ></iframe>
+        </div>
+
         <div class="frame">
           <div class="frame-head">
             <strong>Options page (server manager, browse, queue, settings, diagnostics)</strong>
