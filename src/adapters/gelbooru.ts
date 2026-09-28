@@ -41,6 +41,13 @@ export interface GelbooruLikeOptions {
   hostPatterns: string[];
   apiDocsUrl: string;
   notes?: string[];
+  /**
+   * The instance refuses anonymous API reads (rule34.xxx since 2024). The
+   * endpoint probe then runs with credentials and the UI marks them required.
+   */
+  requiresCredentials?: boolean;
+  /** Optional hint shown for the API-key field (where to find it on this site). */
+  apiKeyPlaceholder?: string;
 }
 
 /**
@@ -93,6 +100,14 @@ function classifyFailure(snapshot: HttpResponseSnapshot, displayName: string): A
   if (generic) return generic;
   const words = detectAuthWordsInBody(snapshot.bodyText);
   if (words) return words;
+  // rule34.xxx answers 200 with a bare JSON string when api_key/user_id are missing.
+  if (/missing authentication|authentication required/i.test(snapshot.bodyText.slice(0, 200))) {
+    return {
+      kind: 'auth-failure',
+      message: `${displayName} requires api_key + user_id for every API request`,
+      hint: 'Create an API key on the site account page and fill in both the API key and the numeric user id.',
+    };
+  }
   // Gelbooru answers 200 with a plain-text error body in some failure modes.
   if (snapshot.status === 200 && !snapshot.contentType.includes('json') && !snapshot.bodyText.trim().startsWith('{') && !snapshot.bodyText.trim().startsWith('[')) {
     const head = snapshot.bodyText.trim().slice(0, 160);
@@ -154,7 +169,7 @@ function normalizePost(raw: unknown, ctx: AdapterContext, displayName: string): 
     artistTags: [],
     characterTags: [],
     score: pickNumber(post, 'score'),
-    md5: pickString(post, 'md5'),
+    md5: pickString(post, 'md5', 'hash'),
     sources,
     createdAt: pickString(post, 'created_at'),
     isVideo: !!ext && ['webm', 'mp4'].includes(ext),
@@ -184,13 +199,17 @@ function interpretEndpointProbe(snapshot: HttpResponseSnapshot, displayName: str
     const booruError = error as BooruError;
     return { ok: false, kind: booruError.kind, message: booruError.message, warnings: booruError.hint ? [booruError.hint] : [] };
   }
+  if (Array.isArray(parsed)) {
+    // Gelbooru 0.1.11 forks (safebooru.org, rule34.xxx, xbooru, …) answer with a bare array.
+    return { ok: true, kind: 'ok', message: `Endpoint OK - legacy DAPI listing responded with ${parsed.length} post(s)` };
+  }
   const record = asRecord(parsed);
   if (!record) {
     return {
       ok: false,
       kind: 'endpoint-mismatch',
       message: `${displayName} did not return the expected JSON envelope`,
-      warnings: ['Expected `{"@attributes": {…}, "post": […]}`; add `json=1` for Gelbooru-compatible APIs.'],
+      warnings: ['Expected `{"@attributes": {…}, "post": […]}` or a bare post array; add `json=1` for Gelbooru-compatible APIs.'],
     };
   }
   const hasEnvelope = !!asRecord(record['@attributes']) || Array.isArray(record.post) || !!asRecord(record.post);
@@ -256,7 +275,7 @@ export function createGelbooruLikeAdapter(options: GelbooruLikeOptions): BooruAd
     siteRatingTokens: SITE_RATING_TOKENS,
 
     capabilities: {
-      supportsAnonymousAccess: true,
+      supportsAnonymousAccess: !options.requiresCredentials,
       supportsRatingFilter: true,
       requiresUsername: false,
       requiresUserId: true,
@@ -352,10 +371,13 @@ export function createGelbooruLikeAdapter(options: GelbooruLikeOptions): BooruAd
       return [
         {
           id: `${options.siteType}-endpoint`,
-          label: 'DAPI listing endpoint (anonymous)',
+          label: options.requiresCredentials ? 'DAPI listing endpoint (credentials required)' : 'DAPI listing endpoint (anonymous)',
           purpose: 'endpoint',
           request: {
-            url: gelbooruSearchUrl(ctx.baseUrl, { limit: 1 }),
+            url: gelbooruSearchUrl(ctx.baseUrl, {
+              limit: 1,
+              ...(options.requiresCredentials && credentialsFor(ctx) ? { credentials: credentialsFor(ctx)! } : {}),
+            }),
             method: 'GET',
             headers: { Accept: 'application/json' },
             tag: options.siteType,
@@ -384,18 +406,20 @@ export function createGelbooruLikeAdapter(options: GelbooruLikeOptions): BooruAd
       const failure = classifyFailure(snapshot, displayName);
       if (failure) throw new BooruError(failure.message, { kind: failure.kind, status: snapshot.status, hint: failure.hint ?? null });
       const parsed = readJson<unknown>(snapshot, `${displayName} listing endpoint`);
-      const record = asRecord(parsed);
-      if (!record) throw shapeError(`${displayName} listing endpoint`, 'expected the DAPI JSON envelope');
+      // Gelbooru 0.2 wraps posts in `{"@attributes":…,"post":[…]}`; 0.1.11 forks
+      // (safebooru.org, rule34.xxx, xbooru, tbib, …) return a bare array.
+      const record = Array.isArray(parsed) ? null : asRecord(parsed);
+      if (!record && !Array.isArray(parsed)) throw shapeError(`${displayName} listing endpoint`, 'expected the DAPI JSON envelope or a post array');
       // A DAPI response always carries `@attributes` and/or a `post` key; JSON
       // without them means this URL is not a Gelbooru-compatible API.
-      if (record['@attributes'] === undefined && record.post === undefined) {
+      if (record && record['@attributes'] === undefined && record.post === undefined) {
         throw new BooruError(`${displayName} answered with JSON, but not the DAPI envelope`, {
           kind: 'endpoint-mismatch',
           status: snapshot.status,
           hint: 'Gelbooru-compatible APIs answer /index.php?page=dapi&s=post&q=index&json=1 with {"@attributes":…,"post":[…]}',
         });
       }
-      const attributes = asRecord(record['@attributes']);
+      const attributes = record ? asRecord(record['@attributes']) : null;
       const limit = Math.min(Math.max(spec.limit ?? 100, 1), 100);
       const offset = attributes ? pickNumber(attributes, 'offset') : null;
       const count = attributes ? pickNumber(attributes, 'count') : null;
@@ -455,17 +479,19 @@ export function createGelbooruLikeAdapter(options: GelbooruLikeOptions): BooruAd
           key: 'apiKey',
           label: 'API key',
           type: 'password',
-          required: false,
+          required: !!options.requiresCredentials,
           requiredForAuth: true,
           secret: true,
-          placeholder: 'from Account > Options > API Access',
-          help: 'Gelbooru authenticates with api_key + user_id.',
+          placeholder: options.apiKeyPlaceholder ?? 'from Account > Options > API Access',
+          help: options.requiresCredentials
+            ? `${displayName} rejects anonymous API requests: api_key + user_id are required.`
+            : 'Gelbooru authenticates with api_key + user_id.',
         },
         {
           key: 'userId',
           label: 'User ID (numeric)',
           type: 'text',
-          required: false,
+          required: !!options.requiresCredentials,
           requiredForAuth: true,
           secret: false,
           placeholder: 'e.g. 1234567',

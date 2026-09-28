@@ -5,3 +5,7 @@ dev/preview/.cache/
 .DS_Store
 coverage/
 .vitest/
+
+# Raw APK / split archives are never tracked; the decompiled reference source under reference/ is.
+*.apk
+*.zip.[0-9][0-9][0-9]

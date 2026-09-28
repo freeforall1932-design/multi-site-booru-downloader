@@ -4,11 +4,28 @@
  * Adding a booru-like site is a single line here plus a new adapter module.
  * Nothing else in the codebase branches on site type - see
  * docs/ADAPTER_CONTRACT.md.
+ *
+ * Families shipped (mirroring what mature clients such as Droidbooru support,
+ * see reference/README.md, minus dead or scrape-only sites):
+ *
+ *   e621            e621.net / e926.net
+ *   danbooru        danbooru.donmai.us and Danbooru 2 forks
+ *   gelbooru        gelbooru.com (Gelbooru 0.2 DAPI)
+ *   gelbooru forks  rule34.xxx, safebooru.org, xbooru, tbib, hypnohub, realbooru (Gelbooru 0.1.11 DAPI)
+ *   moebooru        yande.re, konachan
+ *   philomena       derpibooru, furbooru, ponybooru
+ *   hydrus          your local Hydrus client (Client API)
+ *   kemono          kemono.cr, coomer.st, pawchive.pw (creator archives)
  */
 import { registerAdapter } from '../core/registry.js';
 import { danbooruAdapter } from './danbooru.js';
 import { e621Adapter } from './e621.js';
 import { createGelbooruLikeAdapter, gelbooruAdapter } from './gelbooru.js';
+import { GELBOORU_FORK_ADAPTERS } from './gelbooru-forks.js';
+import { createMoebooruAdapter, MOEBOORU_ADAPTERS } from './moebooru.js';
+import { createPhilomenaAdapter, PHILOMENA_ADAPTERS } from './philomena.js';
+import { hydrusAdapter } from './hydrus.js';
+import { createKemonoAdapter, KEMONO_ADAPTERS } from './kemono.js';
 
 let registered = false;
 
@@ -18,20 +35,41 @@ export function registerBuiltinAdapters(): void {
   registerAdapter(e621Adapter);
   registerAdapter(danbooruAdapter);
   registerAdapter(gelbooruAdapter);
+  for (const adapter of GELBOORU_FORK_ADAPTERS) registerAdapter(adapter);
+  for (const adapter of MOEBOORU_ADAPTERS) registerAdapter(adapter);
+  for (const adapter of PHILOMENA_ADAPTERS) registerAdapter(adapter);
+  registerAdapter(hydrusAdapter);
+  for (const adapter of KEMONO_ADAPTERS) registerAdapter(adapter);
   registered = true;
 }
 
 /**
- * Example: attaching a Gelbooru-compatible fork takes a few lines and no changes
- * to shared code -
+ * Attaching another instance of a known family takes a few lines and no
+ * changes to shared code, e.g.
  *
  *   registerAdapter(createGelbooruLikeAdapter({
- *     siteType: 'rule34',
- *     displayName: 'Rule34',
- *     baseUrl: 'https://rule34.xxx',
- *     label: 'Rule34',
- *     hostPatterns: ['rule34.xxx', 'www.rule34.xxx'],
- *     apiDocsUrl: 'https://rule34.xxx/index.php?page=wiki&s=view&id=18780',
+ *     siteType: 'mybooru',
+ *     displayName: 'My Booru',
+ *     baseUrl: 'https://booru.example',
+ *     label: 'My Booru',
+ *     hostPatterns: ['booru.example'],
+ *     apiDocsUrl: 'https://booru.example/index.php?page=help&topic=dapi',
  *   }));
+ *
+ * Users can also just pick the family in the server form and type any base
+ * URL - host matching for saved servers does not depend on this list.
  */
-export { e621Adapter, danbooruAdapter, gelbooruAdapter, createGelbooruLikeAdapter };
+export {
+  e621Adapter,
+  danbooruAdapter,
+  gelbooruAdapter,
+  createGelbooruLikeAdapter,
+  createMoebooruAdapter,
+  createPhilomenaAdapter,
+  createKemonoAdapter,
+  hydrusAdapter,
+  GELBOORU_FORK_ADAPTERS,
+  MOEBOORU_ADAPTERS,
+  PHILOMENA_ADAPTERS,
+  KEMONO_ADAPTERS,
+};

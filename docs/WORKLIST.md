@@ -21,7 +21,13 @@ later. Last updated for `0.2.0` (side panel release).
 | Add/edit screen with per-site fields, validate-client, save | ✅ | `src/ui/server-form.ts`, `src/core/validation.ts` |
 | **e621 adapter** (first target) | ✅ | `src/adapters/e621.ts` |
 | Danbooru adapter | ✅ | `src/adapters/danbooru.ts` |
-| Gelbooru adapter (+ factory for DAPI forks) | ✅ | `src/adapters/gelbooru.ts` |
+| Gelbooru adapter (+ factory for DAPI forks; accepts 0.2 envelope and 0.1.11 bare arrays) | ✅ | `src/adapters/gelbooru.ts` |
+| Gelbooru 0.1.11 forks: rule34.xxx (auth required), safebooru.org, xbooru, tbib, hypnohub, realbooru | ✅ | `src/adapters/gelbooru-forks.ts` |
+| Moebooru family: yande.re, konachan (`/post.json`, optional `login`+`password_hash`) | ✅ | `src/adapters/moebooru.ts` |
+| Philomena family: derpibooru, furbooru, ponybooru (comma query syntax, ratings as tags, filter pinning) | ✅ | `src/adapters/philomena.ts` |
+| Hydrus Client API (local http, access key, two-step listing → metadata) | ✅ | `src/adapters/hydrus.ts` |
+| Kemono / Coomer / Pawchive creator archives (attachment rows with composite ids, per-node file hosts) | ✅ | `src/adapters/kemono.ts` |
+| Fixture tests for every added family from live-captured response shapes | ✅ | `tests/adapters/families.test.ts` |
 | Documented adapter contract | ✅ | `docs/ADAPTER_CONTRACT.md`, `src/core/adapter.ts`, conformance tests |
 | Shared services (servers, settings, validation, client, queue, naming, downloads, User-Agent rules, router) | ✅ | `src/core/*` |
 | Browsing, single-post download, batch queue | ✅ | `src/ui/browse.ts`, `src/ui/queue-view.ts`, `src/core/queue.ts` |

@@ -88,7 +88,8 @@ export class ValidationService {
       });
     }
     const parsedBase = safeUrl(server.baseUrl);
-    if (parsedBase?.protocol === 'http:') {
+    const loopback = parsedBase ? ['127.0.0.1', 'localhost', '[::1]'].includes(parsedBase.hostname) : false;
+    if (parsedBase?.protocol === 'http:' && !loopback) {
       warnings.push('The base URL uses plain HTTP; credentials would travel unencrypted.');
     }
 

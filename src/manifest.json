@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Booru Server Manager",
   "version": "0.2.0",
-  "description": "Side panel downloader for many saved booru servers: manage e621, Danbooru and Gelbooru-family accounts, list results, review and batch-download.",
+  "description": "Side panel downloader for many saved booru servers: manage e621, Danbooru, Gelbooru-family, Moebooru, Philomena, Hydrus and Kemono accounts, list results, review and batch-download.",
   "minimum_chrome_version": "116",
   "permissions": [
     "storage",
@@ -19,10 +19,34 @@
     "https://danbooru.donmai.us/*",
     "https://gelbooru.com/*",
     "https://www.gelbooru.com/*",
-    "https://*.gelbooru.com/*"
+    "https://*.gelbooru.com/*",
+    "https://rule34.xxx/*",
+    "https://api.rule34.xxx/*",
+    "https://safebooru.org/*",
+    "https://xbooru.com/*",
+    "https://tbib.org/*",
+    "https://hypnohub.net/*",
+    "https://realbooru.com/*",
+    "https://yande.re/*",
+    "https://files.yande.re/*",
+    "https://assets.yande.re/*",
+    "https://konachan.com/*",
+    "https://konachan.net/*",
+    "https://derpibooru.org/*",
+    "https://derpicdn.net/*",
+    "https://furbooru.org/*",
+    "https://ponybooru.org/*",
+    "https://kemono.cr/*",
+    "https://*.kemono.cr/*",
+    "https://coomer.st/*",
+    "https://*.coomer.st/*",
+    "https://pawchive.pw/*",
+    "https://*.pawchive.pw/*"
   ],
   "optional_host_permissions": [
-    "https://*/*"
+    "https://*/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
   "background": {
     "service_worker": "background/service-worker.js",
@@ -32,7 +56,7 @@
     "default_path": "panel/panel.html"
   },
   "action": {
-    "default_title": "Booru Server Manager \u2014 open the download panel",
+    "default_title": "Booru Server Manager — open the download panel",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -55,7 +79,22 @@
         "https://*.donmai.us/posts/*",
         "https://gelbooru.com/index.php*",
         "https://www.gelbooru.com/index.php*",
-        "https://*.gelbooru.com/index.php*"
+        "https://*.gelbooru.com/index.php*",
+        "https://rule34.xxx/index.php*",
+        "https://safebooru.org/index.php*",
+        "https://xbooru.com/index.php*",
+        "https://tbib.org/index.php*",
+        "https://hypnohub.net/index.php*",
+        "https://realbooru.com/index.php*",
+        "https://yande.re/post/show/*",
+        "https://konachan.com/post/show/*",
+        "https://konachan.net/post/show/*",
+        "https://derpibooru.org/images/*",
+        "https://furbooru.org/images/*",
+        "https://ponybooru.org/images/*",
+        "https://kemono.cr/*/user/*/post/*",
+        "https://coomer.st/*/user/*/post/*",
+        "https://pawchive.pw/*/user/*/post/*"
       ],
       "js": [
         "content/post-button.js"

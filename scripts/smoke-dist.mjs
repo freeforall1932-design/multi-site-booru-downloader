@@ -349,7 +349,11 @@ async function main() {
 
   // ---------------------------------------------------------------- diagnostics
   const info = await expectOk({ type: 'diagnostics/info' });
-  check('diagnostics list all three adapters', info.adapters.map((entry) => entry.siteType).sort().join(',') === 'danbooru,e621,gelbooru');
+  const siteTypes = new Set(info.adapters.map((entry) => entry.siteType));
+  check(
+    'diagnostics list every built-in adapter family',
+    ['e621', 'danbooru', 'gelbooru', 'rule34', 'safebooru-org', 'yandere', 'konachan', 'derpibooru', 'hydrus', 'kemono'].every((type) => siteTypes.has(type)),
+  );
   check('diagnostics contain no secrets', !JSON.stringify(info).includes('e621-demo-key') && !JSON.stringify(info).includes('Authorization'));
 
   // --------------------------------------------------------------- route detect

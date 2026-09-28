@@ -1,7 +1,7 @@
 # Booru Server Manager
 
 One Manifest V3 browser extension that manages **many saved booru server/account
-profiles** (e621, Danbooru, Gelbooru and their close forks) and downloads from all
+profiles** (e621, Danbooru, the Gelbooru family, Moebooru, Philomena, Hydrus, Kemono) and downloads from all
 of them through a single docked **side panel**.
 
 The panel is built the way the good side-panel downloaders are built: one dock next
@@ -99,11 +99,71 @@ The design and every setting are documented in
 
 ## Supported sites
 
+Every site is a small adapter behind one shared contract; the UI never branches
+on site type. The families below ship built in. Any other instance of a family
+(a self-hosted Danbooru, a Gelbooru fork not listed, another Philomena site) is
+added by picking the family in the server form and typing its base URL — the
+extension asks for host access to it once.
+
+### Original three
+
 | `siteType` | Site | Auth style | Rating filter | API notes |
 | --- | --- | --- | --- | --- |
 | `e621` | e621.net, e926.net | HTTP Basic (`username:api_key`) or `login`/`api_key` query params | `-rating:s/q/e` | Descriptive User-Agent required by policy; `_client` query fallback for extensions; 320 posts/request; hard 2 req/s |
 | `danbooru` | danbooru.donmai.us, `*.donmai.us` | HTTP Basic or `login`/`api_key` query params | `-rating:general/sensitive/questionable/explicit` | `/profile.json` returns the account; prefer `id:` batching; 200 posts/request; 10 req/s global |
 | `gelbooru` | gelbooru.com, `www.gelbooru.com`, `*.gelbooru.com` | `api_key` + `user_id` query params | `rating:`/`-rating:` tokens | DAPI (`page=dapi&s=post&q=index&json=1`); `{"@attributes":…,"post":[…]}` envelope; 100 posts/request |
+
+### Gelbooru 0.1.11 forks (same DAPI, bare-array JSON, `hash` instead of `md5`)
+
+| `siteType` | Site | Auth | Notes |
+| --- | --- | --- | --- |
+| `rule34` | rule34.xxx (API on api.rule34.xxx) | `api_key` + `user_id` **required** | Anonymous reads answer `"Missing authentication"` since 2024 |
+| `safebooru-org` | safebooru.org | optional | Not the same site as safebooru.donmai.us |
+| `xbooru` | xbooru.com | optional | |
+| `tbib` | tbib.org | optional | Aggregates several boorus |
+| `hypnohub` | hypnohub.net | optional | |
+| `realbooru` | realbooru.com | optional | |
+
+### Moebooru (Danbooru 1.x lineage)
+
+| `siteType` | Site | Auth | Notes |
+| --- | --- | --- | --- |
+| `yandere` | yande.re | optional `login` + `password_hash` | `/post.json` bare array; ratings `s/q/e`; `sample_url` and `jpeg_url` variants |
+| `konachan` | konachan.com, konachan.net (SFW mirror) | optional `login` + `password_hash` | Same API |
+
+The "API key" field holds Moebooru's `password_hash` =
+`SHA1("choujin-steiner--" + password + "--")`; never paste the plain password.
+
+### Philomena (Derpibooru engine)
+
+| `siteType` | Site | Auth | Notes |
+| --- | --- | --- | --- |
+| `derpibooru` | derpibooru.org, trixiebooru.org | optional `key` | Everything filter `56027` pinned; override via the *Filter ID* field |
+| `furbooru` | furbooru.org | optional `key` | |
+| `ponybooru` | ponybooru.org | optional `key` | |
+
+Philomena search syntax is the site's own: **comma-separated** terms, tags may
+contain spaces, `-term` excludes. Ratings are tags (`safe`, `suggestive`,
+`questionable`, `explicit`, `semi-grimdark`, `grimdark`, `grotesque`) and the
+rating filter is spelled `-explicit` etc.
+
+### Local client
+
+| `siteType` | Site | Auth | Notes |
+| --- | --- | --- | --- |
+| `hydrus` | your Hydrus client, `http://127.0.0.1:45869` | Client API access key (**required**, needs *search for and fetch files*) | Comma-separated Hydrus tags, `system:` predicates work; listing pages the id list locally and fetches `file_metadata` per file before download; no ratings |
+
+### Creator archives (not tag boorus)
+
+| `siteType` | Site | Auth | Notes |
+| --- | --- | --- | --- |
+| `kemono` | kemono.cr (kemono.su / .party) | none | Type `service/creatorId` or paste a creator URL to list a creator, `tag:name` for a tag, anything else is a title search. Every attachment becomes one row (`service/creator/post/index`). No ratings. |
+| `coomer` | coomer.st (coomer.su / .party) | none | Same API |
+| `pawchive` | pawchive.pw (formerly pawchive.st) — the community's Kemono successor | none | Same API; files served from `n<node>.pawchive.pw`, thumbnails from `img.pawchive.pw`. Some files are preview-only or need a website login. |
+
+**Deliberately not included** (checked against the Droidbooru reference client in
+`reference/`): IBSearch (site is gone), Shimmie 2 and ZeroChan (HTML scraping
+only — breaks on every theme change), RSS (not a booru).
 
 Additional booru-like sites are added by implementing the adapter contract — see
 [docs/ADAPTER_CONTRACT.md](docs/ADAPTER_CONTRACT.md). No UI or service code changes
@@ -147,6 +207,11 @@ smoke test in one go.
 | e621 | Account → *Manage API Access* (key). Put your e621 username in the username field: e621 policy requires a descriptive User-Agent that identifies you, e.g. `BooruServerManager/0.1.0 (by your_name on e621)`. |
 | Danbooru | Profile → *API Key*. Danbooru asks for a unique descriptive User-Agent too; the extension generates one containing your account id when credentials are present. |
 | Gelbooru | Account → *Options → API Access Credentials*: copy **API key** and **user id** (both are required together). |
+| rule34.xxx and other Gelbooru forks | *My Account → Options → API Access Credentials*; rule34.xxx **requires** both fields even for reading. |
+| yande.re / Konachan | No API key exists; optional auth is your login plus `SHA1("choujin-steiner--" + password + "--")` in the API-key field. |
+| Derpibooru / Philomena | *Account → API Key* (optional). *Filter ID* is the numeric id from the site's Filters page. |
+| Hydrus | In the client: *services → manage services → client api → add* a key with *search for and fetch files*; base URL is shown under *services → review services*. |
+| Kemono / Coomer / Pawchive | Nothing — no login. |
 
 Credentials are stored only in `chrome.storage.local` on your machine, are never
 rendered in full (masked previews only), and are never written to console output or
@@ -187,8 +252,8 @@ changed, the download result carries a warning explaining it.
 Each profile has a rating filter toggle plus an allow-list of canonical ratings
 (`safe`, `general`, `sensitive`, `questionable`, `explicit`). The shared layer
 decides *whether* filtering happens; the adapter decides *how* it is spelled for
-its site (all three targets support the portable exclusion form, e.g.
-`-rating:explicit`). Filters apply to browsing, to queueing and — when
+its site (most sites take the portable exclusion form `-rating:explicit`; Philomena
+uses `-explicit`; Hydrus and Kemono have no ratings and report the filter as unsupported). Filters apply to browsing, to queueing and — when
 *Settings → Enforce rating filter on download* is on — to single-post downloads.
 
 ## Scripts
@@ -253,8 +318,8 @@ dev/preview/   preview harness page
 
 ## Status
 
-Version 0.2.0 — the three target sites are implemented against their official
-APIs, the side panel is the primary surface, and an adapter conformance suite
+Version 0.2.0 — e621, Danbooru and Gelbooru plus the Gelbooru-fork, Moebooru,
+Philomena, Hydrus and Kemono families are implemented against their APIs, the side panel is the primary surface, and an adapter conformance suite
 guards any new site. See [docs/WORKLIST.md](docs/WORKLIST.md) for what is done and
 what is deliberately left for later (e.g. per-site uploads, tag autocomplete,
 archive/PDF picture packing).
