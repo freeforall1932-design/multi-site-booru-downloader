@@ -28,6 +28,10 @@ export interface QueueRowView {
   media: 'video' | 'image';
   /** Canonical rating of the post (shown as a chip so the list stays rating-aware). */
   rating: Rating | null;
+  /** Provider label of a mirror-link row (`Mega`, `Google Drive`, …). */
+  linkProvider?: string | null;
+  /** What a mirror-link row shows as its title (filename or host). */
+  linkHeadline?: string;
 }
 
 export interface QueueListState {
@@ -169,8 +173,10 @@ function summaryTile(value: number, label: string): HTMLElement {
 function queueRow(row: QueueRowView, state: QueueListState, callbacks: QueueListCallbacks): HTMLElement {
   const { item } = row;
   const finished = item.status === 'done';
+  const isLink = item.kind === 'link';
+  const url = item.url ?? item.postUrl;
   const element = h('div', {
-    class: `psQueueItem psStatus-${item.status}${row.selected ? ' psSelected' : ''}`,
+    class: `psQueueItem psStatus-${item.status}${row.selected ? ' psSelected' : ''}${isLink ? ' psLinkRow' : ''}`,
     dataset: { itemId: item.id },
   });
 
@@ -185,7 +191,7 @@ function queueRow(row: QueueRowView, state: QueueListState, callbacks: QueueList
     }),
   );
 
-  if (state.showThumbnails) {
+  if (state.showThumbnails && !isLink) {
     element.appendChild(
       row.thumbnail
         ? h('img', {
@@ -201,24 +207,37 @@ function queueRow(row: QueueRowView, state: QueueListState, callbacks: QueueList
 
   const info = h('div', { class: 'psItemInfo' });
   const title = h('div', { class: 'psItemTitle' });
-  title.appendChild(
-    item.postUrl
-      ? h('a', {
-          href: item.postUrl,
-          target: '_blank',
-          rel: 'noreferrer',
-          text: `#${item.postId}`,
-          title: 'Open the post on the site',
-          onClick: (event) => {
-            event.preventDefault();
-            callbacks.onOpenPost(item);
-          },
-        })
-      : h('span', { text: `#${item.postId}` }),
-  );
-  title.appendChild(h('span', { class: `psTypeBadge${row.media === 'video' ? ' video' : ''}`, text: row.media === 'video' ? 'video' : 'pic' }));
-  if (row.rating) title.appendChild(ratingChip(row.rating));
-  if (row.server) title.appendChild(h('span', { class: 'psTypeBadge server', text: row.server.siteType }));
+  if (isLink) {
+    // A mirror link is not a post: the URL *is* the title, and the label keeps
+    // the post title it was collected from readable in the row.
+    title.appendChild(h('span', { class: 'psTypeBadge server', text: 'link' }));
+    title.appendChild(
+      h('span', {
+        class: 'psTruncate',
+        text: row.linkProvider ? `${row.linkProvider} — ${row.linkHeadline}` : row.linkHeadline,
+        title: url,
+      }),
+    );
+  } else {
+    title.appendChild(
+      item.postUrl
+        ? h('a', {
+            href: item.postUrl,
+            target: '_blank',
+            rel: 'noreferrer',
+            text: `#${item.postId}`,
+            title: 'Open the post on the site',
+            onClick: (event) => {
+              event.preventDefault();
+              callbacks.onOpenPost(item);
+            },
+          })
+        : h('span', { text: `#${item.postId}` }),
+    );
+    title.appendChild(h('span', { class: `psTypeBadge${row.media === 'video' ? ' video' : ''}`, text: row.media === 'video' ? 'video' : 'pic' }));
+    if (row.rating) title.appendChild(ratingChip(row.rating));
+    if (row.server) title.appendChild(h('span', { class: 'psTypeBadge server', text: row.server.siteType }));
+  }
   if (row.savedFilename) {
     title.appendChild(h('span', { class: 'psTypeBadge saved', text: 'saved', title: `Already downloaded as ${row.savedFilename}` }));
   }

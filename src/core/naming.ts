@@ -1,5 +1,6 @@
-import type { BooruPost, ExtensionSettings, ServerConfig } from '../shared/types.js';
+import { DEFAULT_MIRROR_FOLDER, type BooruPost, type ExtensionSettings, type ServerConfig } from '../shared/types.js';
 import { fileExtensionFromUrl, safeUrl } from '../shared/util.js';
+import { extensionFromUrl, fileNameFromUrl } from './links.js';
 
 const MAX_SEGMENT_LENGTH = 120;
 const MAX_FILENAME_LENGTH = 180;
@@ -120,6 +121,70 @@ export function buildDownloadPath(input: NamingInput, now = new Date()): Downloa
     filename = `${filename.slice(0, Math.max(1, keep)).trim()}.${ext}`;
   }
   if (renderedLength > filename.length || renderedName !== filename.replace(new RegExp(`\\.${ext}$`), '')) {
+    warnings.push('Filename was shortened (illegal characters or length) to keep the download path portable.');
+  }
+
+  return {
+    folder,
+    filename,
+    fullPath: folder ? `${folder}/${filename}` : filename,
+    warnings,
+  };
+}
+
+// ------------------------------------------------------------- mirror links
+
+export interface MirrorPathInput {
+  url: string;
+  /** Provider label resolved by the link rules (`Mega`, `Google Drive`, …). */
+  provider?: string | null;
+  /** Profile the link was collected with (provenance only). */
+  siteType?: string | null;
+  settings: Pick<ExtensionSettings, 'mirrorFolderTemplate'>;
+  /** Existing filename recorded on the link row, when one was already used. */
+  filename?: string | null;
+  now?: Date;
+}
+
+/**
+ * Where a collected mirror link is saved.
+ *
+ * Mirror files are not booru posts: there is no post metadata, no md5 and often
+ * no filename at all (a Drive *folder* link, for instance). The template only
+ * gets tokens that exist for a URL - `{host}`, `{provider}`, `{siteType}`,
+ * `{filename}`, `{ext}`, `{date}` - and the URL's own last path segment is used
+ * as the filename, falling back to the provider name. Everything goes through
+ * the same sanitiser as post filenames, so traversal and reserved names stay
+ * impossible.
+ */
+export function buildMirrorPath(input: MirrorPathInput): DownloadPath {
+  const { url, settings } = input;
+  const now = input.now ?? new Date();
+  const parsed = safeUrl(url);
+  const host = parsed?.hostname ?? 'unknown-host';
+  const ext = extensionFromUrl(url);
+  const baseName = input.filename?.trim() || fileNameFromUrl(url) || `${input.provider ?? host}`;
+  const withoutExt = ext ? baseName.replace(new RegExp(`\\.${ext}$`, 'i'), '') : baseName;
+  const warnings: string[] = [];
+
+  const tokens: TemplateTokens = {
+    host,
+    provider: input.provider ?? host,
+    siteType: input.siteType ?? 'link',
+    filename: baseName,
+    ext: ext ?? '',
+    date: now.toISOString().slice(0, 10),
+  };
+
+  const template = settings.mirrorFolderTemplate || DEFAULT_MIRROR_FOLDER;
+  const folder = sanitizeFolderPath(renderTemplate(template, tokens));
+  let filename = sanitizePathSegment(withoutExt, 'download');
+  if (ext && !hasExtension(filename, ext)) filename = `${filename}.${ext}`;
+  if (!ext) warnings.push('The link did not show a file extension; the saved name may need adjusting.');
+
+  if (baseName.length > MAX_FILENAME_LENGTH) {
+    const keep = MAX_FILENAME_LENGTH - (ext ? ext.length + 1 : 0);
+    filename = `${sanitizePathSegment(withoutExt.slice(0, Math.max(1, keep)), 'download')}${ext ? `.${ext}` : ''}`;
     warnings.push('Filename was shortened (illegal characters or length) to keep the download path portable.');
   }
 

@@ -1,5 +1,5 @@
 import { BooruError } from '../shared/errors.js';
-import type { HttpClient } from '../shared/http.js';
+import { parseJsonBody, type HttpClient } from '../shared/http.js';
 import type {
   BooruPost,
   ExtensionSettings,
@@ -110,6 +110,31 @@ export class BooruClient {
       minIntervalMs: Math.max(settings.minRequestIntervalMs, adapter.capabilities.minRequestIntervalMs),
     });
     return adapter.parsePostResponse(snapshot, postId, ctx);
+  }
+
+  /**
+   * The post exactly as the site sent it.
+   *
+   * `BooruPost` is deliberately lossy - it carries what a *booru* needs. The
+   * Links tab needs the opposite: every URL buried anywhere in the payload
+   * (creator archives keep their real downloads in a `content` HTML field,
+   * which no adapter field maps to). Reading the raw JSON keeps that feature
+   * site-agnostic and leaves the adapter contract untouched.
+   */
+  async getPostPayload(serverId: string | null, postId: string): Promise<unknown> {
+    const { server, adapter } = await this.resolve(serverId);
+    const settings = await this.deps.settings.get();
+    const ctx = createAdapterContext(adapter, server, settings);
+    const request = adapter.buildPostRequest(ctx, postId);
+    const snapshot = await this.deps.http.request(request, {
+      rateKey: `server:${server.id}`,
+      minIntervalMs: Math.max(settings.minRequestIntervalMs, adapter.capabilities.minRequestIntervalMs),
+    });
+    const failure = adapter.classifyFailure?.(snapshot) ?? null;
+    if (failure) {
+      throw new BooruError(failure.message, { kind: failure.kind, status: snapshot.status, hint: failure.hint ?? null });
+    }
+    return parseJsonBody<unknown>(snapshot, `${adapter.displayName} post ${postId}`);
   }
 
   async validateServer(serverId: string): Promise<ReturnType<ValidationService['validate']>> {

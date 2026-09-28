@@ -1193,10 +1193,131 @@ input[type='checkbox'] {
   border-color: color-mix(in srgb, var(--danger) 50%, var(--border));
 }
 
+/* ---------------------------------------------------------------- links tab */
+
+.psLinksCard .psSummary {
+  margin-bottom: 8px;
+}
+
+.psLinksHead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.psLinksHead h2 {
+  margin: 0;
+  font-size: 13px;
+}
+
+.psLinkGroups {
+  gap: 3px;
+}
+
+.psLinkGroup {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 8px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.psLinkGroupTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.psLinkRow {
+  padding-left: 6px;
+}
+
+.psLinkRow .psFile {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+
 /* Narrow docks: stack the dock controls instead of squeezing them. */
 @media (max-width: 360px) {
   .psDockControls {
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+/* ------------------------------------------------------------------ tasks
+   A task is the package view inside the Links tab: one creator, its files, and
+   what the last pass did. Deliberately row-shaped like a queue item, so the same
+   information reads the same way in both places. */
+.psTaskList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  margin: var(--space-2, 8px) 0;
+}
+
+.psTask {
+  border: 1px solid var(--border, #2c3140);
+  border-left: 3px solid var(--accent, #7aa2f7);
+  border-radius: 8px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.psTask-complete {
+  border-left-color: var(--ok, #46b17b);
+}
+.psTask-partial {
+  border-left-color: var(--warn, #d8a657);
+}
+.psTask-failed {
+  border-left-color: var(--danger, #f07178);
+}
+.psTask-in-progress {
+  border-left-color: var(--info, #7aa2f7);
+}
+
+.psTaskHead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.psTaskTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.psTaskToggle {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.psTaskActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.psTaskFiles {
+  margin-top: var(--space-2, 8px);
+  border-top: 1px dashed var(--border, #2c3140);
+  padding-top: var(--space-2, 8px);
 }

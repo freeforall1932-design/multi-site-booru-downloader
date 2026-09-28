@@ -25,16 +25,27 @@ import type {
   DownloadHistoryEntry,
   ExtensionSettings,
   MediaFilter,
+  MirrorLink,
+  MirrorLinkStats,
   PanelTab,
   QueueItem,
   QueueSummary,
   RouteMatch,
   SearchResult,
   ServerConfigView,
+  TaskView,
   ValidationResult,
 } from '../shared/types.js';
 import { h } from '../ui/dom.js';
 import { renderDiagnostics, copyDiagnostics } from '../ui/diagnostics-view.js';
+import {
+  pickFile,
+  renderLinksCard,
+  type LinkExportGrouping,
+  type LinksState,
+  type MirrorLinkRow,
+  type TaskCardView,
+} from '../ui/panel-links.js';
 import { postMatchesMedia, renderListingCard, type ListingState } from '../ui/panel-listing.js';
 import { renderPostCard, renderTabContext, type PostCardState, type TabContext } from '../ui/panel-context.js';
 import { renderDock, renderQueueList, type DockState, type QueueListState, type QueueRowView } from '../ui/panel-queue.js';
@@ -52,11 +63,13 @@ const els = {
   contextHost: document.getElementById('context-host') as HTMLElement,
   browsePane: document.getElementById('pane-browse') as HTMLElement,
   queuePane: document.getElementById('pane-queue') as HTMLElement,
+  linksPane: document.getElementById('pane-links') as HTMLElement,
   serversPane: document.getElementById('pane-servers') as HTMLElement,
   settingsPane: document.getElementById('pane-settings') as HTMLElement,
   listingHost: document.getElementById('listing-host') as HTMLElement,
   browseListHost: document.getElementById('browse-list-host') as HTMLElement,
   queueHost: document.getElementById('queue-host') as HTMLElement,
+  linksHost: document.getElementById('links-host') as HTMLElement,
   serversHost: document.getElementById('servers-host') as HTMLElement,
   settingsHost: document.getElementById('settings-host') as HTMLElement,
   dock: document.getElementById('dock') as HTMLElement,
@@ -68,9 +81,13 @@ const platform = getPlatform();
 const TABS: Array<{ id: PanelTab; label: string }> = [
   { id: 'browse', label: 'Browse' },
   { id: 'queue', label: 'Queue' },
+  { id: 'links', label: 'Links' },
   { id: 'servers', label: 'Servers' },
   { id: 'settings', label: 'Settings' },
 ];
+
+/** Profiles whose API answers with the post bodies mirror links live in. */
+const ARCHIVE_SITE_TYPES = new Set(['kemono', 'coomer', 'pawchive']);
 
 interface ListingRuntime {
   serverId: string | null;
@@ -100,6 +117,27 @@ interface EditorRuntime {
   saving: boolean;
 }
 
+interface LinksRuntime {
+  serverId: string | null;
+  query: string;
+  links: MirrorLink[];
+  stats: MirrorLinkStats;
+  /** One entry per task (creator), newest first, as the worker knows them. */
+  tasks: TaskView[];
+  /** Task cards the user opened. */
+  expanded: Set<string>;
+  /** The task a collect run is currently filling (so scans join the right one). */
+  activeTaskId: string | null;
+  busyTaskId: string | null;
+  selection: Set<string>;
+  /** Rows seen at the last refresh, so nothing appears pre-ticked twice. */
+  snapshot: Set<string>;
+  busy: boolean;
+  progress: { done: number; total: number; label: string } | null;
+  exportGrouping: LinkExportGrouping;
+  error: { message: string; kind: string; hint: string | null } | null;
+}
+
 interface PanelState {
   tab: PanelTab;
   servers: ServerConfigView[];
@@ -110,6 +148,7 @@ interface PanelState {
   post: PostCardState;
   listing: ListingRuntime;
   queue: { summary: QueueSummary; items: QueueItem[]; maxConcurrency: number; busy: boolean };
+  links: LinksRuntime;
   selection: Set<string>;
   /** Pending rows seen at the last refresh, so new rows appear ticked. */
   pendingSnapshot: Set<string>;
@@ -156,6 +195,22 @@ const state: PanelState = {
     skippedDownloaded: 0,
   },
   queue: { summary: emptySummary(), items: [], maxConcurrency: 2, busy: false },
+  links: {
+    serverId: null,
+    query: '',
+    links: [],
+    stats: { total: 0, new: 0, queued: 0, done: 0, failed: 0 },
+    tasks: [],
+    expanded: new Set(),
+    activeTaskId: null,
+    busyTaskId: null,
+    selection: new Set(),
+    snapshot: new Set(),
+    busy: false,
+    progress: null,
+    exportGrouping: 'post',
+    error: null,
+  },
   selection: new Set(),
   pendingSnapshot: new Set(),
   history: new Map(),
@@ -192,7 +247,9 @@ async function boot(): Promise<void> {
     els.previewBanner.hidden = false;
   }
 
-  await Promise.all([refreshSettings(), refreshServers(), refreshQueue(), refreshHistory()]);
+  await Promise.all([refreshSettings(), refreshServers(), refreshQueue(), refreshHistory(), refreshLinks()]);
+  state.links.serverId =
+    state.servers.find((entry) => ARCHIVE_SITE_TYPES.has(entry.siteType))?.id ?? state.servers[0]?.id ?? null;
   state.listing.media = state.settings?.mediaFilter ?? 'all';
   state.listing.skipDownloaded = state.settings?.skipDownloaded ?? true;
   state.tab = hashTab() ?? state.settings?.panelDefaultTab ?? 'browse';
@@ -233,6 +290,25 @@ async function refreshQueue(): Promise<void> {
   if (!result) return;
   state.queue = { summary: result.summary, items: result.items, maxConcurrency: result.maxConcurrency, busy: state.queue.busy };
   reconcileSelection();
+}
+
+async function refreshLinks(): Promise<void> {
+  const result = await send<{ links: MirrorLink[]; stats: MirrorLinkStats }>({ type: 'links/list' });
+  if (!result) return;
+  state.links.links = result.links;
+  state.links.stats = result.stats;
+  await refreshTasks();
+  reconcileLinksSelection();
+}
+
+/** The task list: one entry per creator, with its file statistics. */
+async function refreshTasks(): Promise<void> {
+  const result = await send<{ tasks: TaskView[] }>({ type: 'tasks/list' });
+  if (!result) return;
+  state.links.tasks = result.tasks;
+  const known = new Set(result.tasks.map((entry) => entry.task.id));
+  for (const id of [...state.links.expanded]) if (!known.has(id)) state.links.expanded.delete(id);
+  if (state.links.activeTaskId && !known.has(state.links.activeTaskId)) state.links.activeTaskId = null;
 }
 
 async function refreshHistory(): Promise<void> {
@@ -285,6 +361,12 @@ async function refreshContext(): Promise<void> {
     differentProfile: null,
   };
   if (server) state.listing.serverId = server.id;
+  // A creator page: make its profile the Links source and offer the creator as
+  // the query (never overwriting what the user typed themselves).
+  if (route && ARCHIVE_SITE_TYPES.has(route.siteType) && route.tags && !state.links.query) {
+    state.links.query = route.tags;
+  }
+  if (server && ARCHIVE_SITE_TYPES.has(server.siteType)) state.links.serverId = server.id;
   render();
 
   if (route?.kind === 'post' && route.postId && server) {
@@ -356,12 +438,14 @@ function render(): void {
   renderShell();
   els.browsePane.hidden = state.tab !== 'browse';
   els.queuePane.hidden = state.tab !== 'queue';
+  els.linksPane.hidden = state.tab !== 'links';
   els.serversPane.hidden = state.tab !== 'servers';
   els.settingsPane.hidden = state.tab !== 'settings';
   els.dock.hidden = state.tab !== 'browse' && state.tab !== 'queue';
   renderContext();
   if (state.tab === 'browse') renderBrowse();
   if (state.tab === 'queue') renderQueueTab();
+  if (state.tab === 'links') renderLinksTab();
   if (state.tab === 'servers') renderServersTab();
   if (state.tab === 'settings') renderSettingsTab();
   renderDockBar();
@@ -543,6 +627,477 @@ function renderQueueTab(): void {
   els.queueHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
 }
 
+// ---------------------------------------------------------------------- links
+
+/**
+ * Rows arrive ticked when they are new, exactly like queue rows; a link the user
+ * unticked stays unticked across refreshes.
+ */
+function reconcileLinksSelection(): void {
+  const available = new Set(state.links.links.map((link) => link.id));
+  const next = new Set<string>();
+  for (const id of state.links.selection) if (available.has(id)) next.add(id);
+  for (const link of state.links.links) {
+    if (link.status === 'done' || link.status === 'failed') continue;
+    if (!state.links.snapshot.has(link.id)) next.add(link.id);
+  }
+  state.links.selection = next;
+  state.links.snapshot = available;
+}
+
+function currentLinksServer(): ServerConfigView | null {
+  return state.servers.find((entry) => entry.id === state.links.serverId) ?? null;
+}
+
+function buildLinksState(): LinksState {
+  const server = currentLinksServer();
+  const rowLimit = state.settings?.queueRowLimit ?? 60;
+  const byServer = new Map(state.servers.map((entry) => [entry.id, entry.label]));
+  const rowFor = (link: MirrorLink): MirrorLinkRow => ({
+    link,
+    serverLabel: link.serverId ? byServer.get(link.serverId) ?? null : null,
+    selected: state.links.selection.has(link.id),
+  });
+  const byId = new Map(state.links.links.map((link) => [link.id, link]));
+
+  let budget = rowLimit;
+  const tasks: TaskCardView[] = [];
+  const claimed = new Set<string>();
+  for (const view of state.links.tasks) {
+    const members = view.task.memberIds
+      .map((id) => byId.get(id))
+      .filter((link): link is MirrorLink => !!link);
+    for (const link of members) claimed.add(link.id);
+    const expanded = state.links.expanded.has(view.task.id);
+    const rows = expanded ? members.slice(0, Math.max(0, budget)) : [];
+    budget -= rows.length;
+    tasks.push({
+      view,
+      rows: expanded ? rows.map(rowFor) : [],
+      hiddenRows: expanded ? Math.max(0, members.length - rows.length) : 0,
+      expanded,
+    });
+  }
+
+  // Everything a task does not own: bare imports, userscript exports, single links.
+  const unfiledAll = state.links.links.filter((link) => !claimed.has(link.id));
+  const unfiled = unfiledAll.slice(0, Math.max(0, budget)).map(rowFor);
+  budget -= unfiled.length;
+
+  return {
+    servers: state.servers,
+    serverId: state.links.serverId,
+    query: state.links.query,
+    canCollect: !!server && ARCHIVE_SITE_TYPES.has(server.siteType),
+    busy: state.links.busy,
+    progress: state.links.progress,
+    error: state.links.error,
+    stats: state.links.stats,
+    tasks,
+    unfiled,
+    unfiledHidden: Math.max(0, unfiledAll.length - unfiled.length),
+    selectionCount: state.links.selection.size,
+    exportGrouping: state.links.exportGrouping,
+    filterMode: state.settings?.mirrorLinksFilter ?? 'downloads',
+    queuePending: state.queue.items.filter((item) => item.kind === 'link' && item.status === 'pending').length,
+  };
+}
+
+function renderLinksTab(): void {
+  const host = h('div');
+  renderLinksCard(host, buildLinksState(), {
+    onServerChange: (serverId) => {
+      state.links.serverId = serverId;
+      renderLinksTab();
+    },
+    onQueryChange: (query) => {
+      state.links.query = query;
+    },
+    onCollect: () => void collectLinks(),
+    onStop: () => {
+      state.crawlAborted = true;
+      state.links.busy = false;
+      state.links.progress = null;
+      state.dockNotice = { text: 'Link collection stopped. Everything found so far is kept.', tone: 'plain' };
+      render();
+    },
+    onToggleRow: (id) => {
+      if (state.links.selection.has(id)) state.links.selection.delete(id);
+      else state.links.selection.add(id);
+      renderLinksTab();
+    },
+    onSelectAll: (select) => {
+      const selectable = state.links.links.filter((link) => link.status !== 'done');
+      state.links.selection = select ? new Set(selectable.map((link) => link.id)) : new Set();
+      renderLinksTab();
+    },
+    onInvert: () => {
+      const next = new Set<string>();
+      for (const link of state.links.links) {
+        if (link.status === 'done') continue;
+        if (!state.links.selection.has(link.id)) next.add(link.id);
+      }
+      state.links.selection = next;
+      renderLinksTab();
+    },
+    onAddToQueue: (ids) => void queueLinks(ids),
+    onExport: (grouping) => void exportLinks(grouping),
+    onImport: (text, filename) => void importTaskPackage(text, filename),
+    onRemoveSelected: (ids) => void removeLinks(ids),
+    onRemoveRow: (id) => void removeLinks([id]),
+    onClear: (scope) => void clearLinks(scope),
+    onOpenLink: (url) => globalThis.open(url, '_blank', 'noreferrer'),
+    onOpenPost: (url) => globalThis.open(url, '_blank', 'noreferrer'),
+    onOpenQueue: () => switchTab('queue'),
+    onOpenSettings: () => switchTab('settings'),
+    onToggleTask: (taskId) => {
+      if (state.links.expanded.has(taskId)) state.links.expanded.delete(taskId);
+      else state.links.expanded.add(taskId);
+      renderLinksTab();
+    },
+    onTaskStart: (taskId, mode) => void runTask(taskId, mode),
+    onTaskPause: (taskId) => void pauseTask(taskId),
+    onTaskRescan: (taskId) => void rescanTask(taskId),
+    onTaskExport: (taskId) => void exportTask(taskId),
+    onTaskRemove: (taskId) => void removeTask(taskId),
+  });
+  els.linksHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
+}
+
+/**
+ * Walk a creator and harvest the mirror links of every post.
+ *
+ * One listing request per page, then one request per post - the panel drives the
+ * loop so the progress bar moves, Stop is instant, and each request still goes
+ * through the background worker's per-server rate limiter. Found links are
+ * written to storage as they arrive, so closing the panel mid-scan loses nothing.
+ */
+async function collectLinks(): Promise<void> {
+  const server = currentLinksServer();
+  const query = state.links.query.trim();
+  if (!server || !query) return;
+
+  state.links.busy = true;
+  state.links.error = null;
+  state.links.progress = { done: 0, total: 0, label: 'Reading the creator listing…' };
+  state.crawlAborted = false;
+  renderLinksTab();
+
+  // Every collect run belongs to a task (one per creator), so its files stay
+  // traceable: what was scanned, what came in, what still fails.
+  let taskId: string | null = state.links.activeTaskId;
+  try {
+    const begun = await send<{ task: TaskView; created: boolean }>({
+      type: 'tasks/begin',
+      payload: { serverId: server.id, query },
+    });
+    if (begun?.task) {
+      taskId = begun.task.task.id;
+      state.links.activeTaskId = taskId;
+      if (begun.created) state.links.expanded.add(taskId);
+    }
+  } catch {
+    // A task is bookkeeping, not a requirement: without it the scan still works.
+    taskId = null;
+  }
+
+  const maxPosts = 1000;
+  const pageLimit = Math.max(1, Math.ceil(maxPosts / 50));
+  let scanned = 0;
+  let found = 0;
+  let duplicates = 0;
+  let failed = 0;
+  let postBudget = maxPosts;
+
+  try {
+    for (let page = 1; page <= pageLimit && !state.crawlAborted; page += 1) {
+      const listing = await send<{
+        posts: Array<{ id: string; label: string; postUrl: string }>;
+        hasMore: boolean;
+        totalCount: number | null;
+        page: number;
+      }>({ type: 'links/posts', payload: { serverId: server.id, query, page } });
+      if (!listing) {
+        state.links.error = {
+          message: 'The creator listing could not be read.',
+          kind: 'network-failure',
+          hint: 'Check the profile, the wait between requests, then try again.',
+        };
+        break;
+      }
+      if (!listing.posts.length) break;
+      const posts = listing.posts.slice(0, postBudget);
+      postBudget -= posts.length;
+
+      for (const post of posts) {
+        if (state.crawlAborted) break;
+        const result = await send<{ added: MirrorLink[]; duplicates: number; total: number }>({
+          type: 'links/scanPost',
+          payload: { serverId: server.id, postId: post.id, postUrl: post.postUrl, postTitle: post.label, creator: query, taskId },
+        });
+        scanned += 1;
+        if (!result) {
+          failed += 1;
+        } else {
+          found += result.added.length;
+          duplicates += result.duplicates;
+        }
+        state.links.progress = {
+          done: scanned,
+          total: Math.min(maxPosts, listing.totalCount ?? maxPosts),
+          label: `Scanned ${scanned} post(s) · ${found} new link(s)${duplicates ? ` · ${duplicates} already known` : ''}`,
+        };
+        renderLinksTab();
+      }
+
+      await refreshLinks();
+      if (!listing.hasMore || postBudget <= 0) break;
+    }
+
+    const stats = state.links.stats;
+    state.dockNotice = state.crawlAborted
+      ? { text: `Stopped after ${scanned} post(s). ${found} new link(s) kept.`, tone: 'plain' }
+      : {
+          text: `${scanned} post(s) scanned · ${found} new link(s)${failed ? ` · ${failed} post(s) failed` : ''} · ${stats.total} in the list.`,
+          tone: found ? 'ok' : 'plain',
+        };
+  } catch (error) {
+    state.links.error = {
+      message: error instanceof Error ? error.message : String(error),
+      kind: 'unknown',
+      hint: null,
+    };
+  } finally {
+    state.links.busy = false;
+    state.links.progress = null;
+    await refreshLinks();
+    render();
+  }
+}
+
+async function queueLinks(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const result = await send<{ queued: number; skipped: number; invalid: number }>({
+    type: 'links/queue',
+    payload: { ids },
+  });
+  if (!result) return;
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  state.dockNotice = {
+    text: `${result.queued} link(s) added to the download queue${result.skipped ? `, ${result.skipped} already queued` : ''}${
+      result.invalid ? `, ${result.invalid} invalid` : ''
+    }. Open the Queue tab to review and start them.`,
+    tone: result.queued ? 'ok' : 'plain',
+  };
+  toast(`${result.queued} link(s) queued`, result.queued ? 'success' : 'info');
+  render();
+}
+
+async function exportLinks(grouping: LinkExportGrouping): Promise<void> {
+  state.links.exportGrouping = grouping;
+  const result = await send<{ text: string; filename: string; count: number }>({
+    type: 'links/export',
+    payload: { grouping },
+  });
+  if (!result) return;
+  if (!result.count) {
+    toast('Nothing collected yet — nothing to export.', 'warning');
+    renderLinksTab();
+    return;
+  }
+  const blob = new Blob([result.text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = result.filename;
+  anchor.click();
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast(`Exported ${result.count} link(s) to ${result.filename}`, 'success');
+  renderLinksTab();
+}
+
+async function importLinks(text: string, filename: string): Promise<void> {
+  if (!text.trim()) {
+    toast(`“${filename}” was empty or could not be read.`, 'error');
+    return;
+  }
+  const result = await send<{ parsed: number; added: number; updated: number; invalid: number }>({
+    type: 'links/import',
+    payload: { text, serverId: state.links.serverId },
+  });
+  if (!result) return;
+  await refreshLinks();
+  state.dockNotice = {
+    text: `${result.added} link(s) imported from ${filename}${result.updated ? `, ${result.updated} already known` : ''}${
+      result.invalid ? `, ${result.invalid} unreadable line(s)` : ''
+    }. Tick the ones you want, then press Add to download queue.`,
+    tone: result.added ? 'ok' : 'plain',
+  };
+  toast(`${result.added} link(s) imported from ${filename}`, result.added ? 'success' : 'warning');
+  render();
+}
+
+async function removeLinks(ids: string[]): Promise<void> {
+  if (!ids.length) return;
+  const result = await send<{ removed: number }>({ type: 'links/remove', payload: { ids } });
+  for (const id of ids) state.links.selection.delete(id);
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  if (result) toast(`${result.removed} link(s) removed from the list`, 'info');
+  render();
+}
+
+async function clearLinks(scope: 'all' | 'done' | 'pending'): Promise<void> {
+  if (scope === 'all' && state.links.stats.total && !globalThis.confirm('Clear every collected link? Queued rows are dropped too. Files already downloaded stay on disk.')) {
+    return;
+  }
+  const result = await send<{ removed: number }>({ type: 'links/clear', payload: { scope } });
+  state.links.selection = new Set();
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  if (result) toast(`${result.removed} link(s) cleared`, 'success');
+  render();
+}
+
+// ----------------------------------------------------------------- task actions
+
+/** Queue everything a task is missing (new files and retries) and start it. */
+async function runTask(taskId: string, mode: 'missing' | 'all'): Promise<void> {
+  state.links.busyTaskId = taskId;
+  renderLinksTab();
+  const result = await send<{
+    queued: number;
+    skipped: number;
+    started: boolean;
+    plan: { alreadyDone: number; alreadyQueued: number; retrying: number; total: number };
+  }>({ type: 'tasks/run', payload: { taskId, mode } });
+  state.links.busyTaskId = null;
+  if (!result) {
+    renderLinksTab();
+    return;
+  }
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  const parts = [`${result.queued} file(s) queued`];
+  if (result.plan.retrying) parts.push(`${result.plan.retrying} retry`);
+  if (result.plan.alreadyDone) parts.push(`${result.plan.alreadyDone} already saved, skipped`);
+  if (result.skipped) parts.push(`${result.skipped} already in the queue`);
+  state.dockNotice = {
+    text: `${parts.join(' · ')}.${result.started ? ' Downloading slowly in the background.' : ''}`,
+    tone: result.queued ? 'ok' : 'plain',
+  };
+  toast(result.queued ? `${result.queued} file(s) queued` : 'Nothing left to download', result.queued ? 'success' : 'info');
+  render();
+}
+
+/** Pause a task: its waiting rows leave the queue, files in flight are kept. */
+async function pauseTask(taskId: string): Promise<void> {
+  const result = await send<{ task: TaskView | null }>({ type: 'tasks/pause', payload: { taskId } });
+  if (!result) return;
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  state.dockNotice = { text: 'Task paused. Files already saved stay saved; Download missing resumes the rest.', tone: 'plain' };
+  render();
+}
+
+/** Look for posts the task has never scanned (new uploads) and attach their files. */
+async function rescanTask(taskId: string): Promise<void> {
+  state.links.busyTaskId = taskId;
+  renderLinksTab();
+  const result = await send<{ scannedPosts: number; added: number; failed: number; hasMore: boolean }>({
+    type: 'tasks/rescan',
+    payload: { taskId, maxPosts: 200 },
+  });
+  state.links.busyTaskId = null;
+  if (!result) {
+    renderLinksTab();
+    return;
+  }
+  await refreshLinks();
+  state.dockNotice = {
+    text: `${result.scannedPosts} new post(s) scanned · ${result.added} file(s) added${
+      result.failed ? ` · ${result.failed} post(s) unreadable` : ''
+    }${result.hasMore ? ' · more posts remain' : ''}. Press Download missing to fetch them.`,
+    tone: result.added ? 'ok' : 'plain',
+  };
+  toast(result.added ? `${result.added} new file(s) found` : 'No new posts found', result.added ? 'success' : 'info');
+  render();
+}
+
+/** Export the task's package: the manifest and the grouped list, both at once. */
+async function exportTask(taskId: string): Promise<void> {
+  const result = await send<{ files: Array<{ filename: string; text: string; mime: string }>; count: number }>({
+    type: 'tasks/export',
+    payload: { taskId },
+  });
+  if (!result?.files?.length) {
+    toast('Nothing to export yet — collect or import some files first.', 'warning');
+    return;
+  }
+  for (const file of result.files) {
+    const blob = new Blob([file.text], { type: `${file.mime};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = file.filename;
+    anchor.click();
+    globalThis.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+  toast(`Package written (${result.count} file(s)): ${result.files.map((file) => file.filename).join(' + ')}`, 'success');
+  renderLinksTab();
+}
+
+async function removeTask(taskId: string): Promise<void> {
+  const task = state.links.tasks.find((entry) => entry.task.id === taskId)?.task ?? null;
+  const confirmed = globalThis.confirm(
+    `Remove the task "${task?.name ?? taskId}"?\n\nThe files stay in the collected list and anything already downloaded stays on disk.`,
+  );
+  if (!confirmed) return;
+  const result = await send<{ removed: boolean }>({ type: 'tasks/remove', payload: { taskId, keepFiles: true } });
+  state.links.expanded.delete(taskId);
+  if (state.links.activeTaskId === taskId) state.links.activeTaskId = null;
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  if (result?.removed) toast('Task removed', 'info');
+  render();
+}
+
+/**
+ * "Pick from file": read a package someone sent (or a plain list) and show it as
+ * a task.
+ *
+ * Nothing downloads here. The task arrives idle, and the user presses Download
+ * missing when they are ready - which is also where the "skip what I already
+ * have" rule lives, so re-importing the same file never re-downloads.
+ */
+async function importTaskPackage(text: string, filename: string): Promise<void> {
+  if (!text.trim()) {
+    toast(`“${filename}” was empty or could not be read.`, 'error');
+    return;
+  }
+  const result = await send<{
+    kind: 'json' | 'txt' | 'unknown';
+    created: boolean;
+    parsed: number;
+    added: number;
+    updated: number;
+    invalid: number;
+    task: TaskView | null;
+    error: string | null;
+  }>({ type: 'tasks/import', payload: { text, filename, serverId: state.links.serverId } });
+  if (!result) return;
+  if (result.error || !result.task) {
+    toast(result.error ?? 'That file could not be read.', 'error');
+    return;
+  }
+  if (result.task.task.id) state.links.expanded.add(result.task.task.id);
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  const kind = result.kind === 'json' ? 'package' : 'link list';
+  state.dockNotice = {
+    text: `${result.task.task.name}: ${result.parsed} link(s) read from ${filename} (${kind}) · ${result.added} new${
+      result.updated ? `, ${result.updated} already known` : ''
+    }${result.invalid ? `, ${result.invalid} unreadable` : ''}. It is idle - press Download missing when you want it.`,
+    tone: result.added ? 'ok' : 'plain',
+  };
+  toast(`${result.task.task.name} imported — ${result.added} new file(s), ${result.updated} already known`, result.added ? 'success' : 'info');
+  render();
+}
+
 function currentServer(): ServerConfigView | null {
   return state.servers.find((entry) => entry.id === state.listing.serverId) ?? null;
 }
@@ -600,6 +1155,9 @@ function isVideoItem(item: QueueItem): boolean {
 }
 
 function mediaMatchesItem(item: QueueItem): boolean {
+  // The media filter describes booru posts; a mirror link is neither picture nor
+  // video until it is fetched, so it is never filtered out.
+  if (item.kind === 'link') return true;
   if (state.listing.media === 'all') return true;
   return state.listing.media === 'video' ? isVideoItem(item) : !isVideoItem(item);
 }
@@ -609,14 +1167,19 @@ function buildQueueListState(): QueueListState {
   const limit = state.settings?.queueRowLimit ?? 60;
   const rows: QueueRowView[] = items.slice(0, limit).map((item) => {
     const historyEntry = state.history.get(`${item.serverId}:${item.postId}`) ?? null;
+    const isLink = item.kind === 'link';
+    const stored = isLink ? state.links.links.find((link) => link.id === item.postId) ?? null : null;
+    const url = item.url ?? item.postUrl;
     return {
       item,
       server: state.servers.find((entry) => entry.id === item.serverId) ?? null,
       selected: state.selection.has(item.id),
       savedFilename: historyEntry?.filename ?? null,
-      thumbnail: state.settings?.showThumbnails === false ? '' : state.thumbnails.get(item.postId) ?? '',
+      thumbnail: state.settings?.showThumbnails === false || isLink ? '' : state.thumbnails.get(item.postId) ?? '',
       media: isVideoItem(item) ? 'video' : 'image',
       rating: item.rating ?? null,
+      linkProvider: stored?.provider ?? null,
+      linkHeadline: isLink ? (item.filename ?? url).replace(/^.*\//, '') || url : undefined,
     };
   });
   return {
@@ -1012,7 +1575,10 @@ function startPolling(): void {
       const shouldRefreshQueue = active || state.tab === 'queue' || state.queue.summary.pending > 0;
       if (shouldRefreshQueue) await refreshQueue();
       if (active || pollTick % 5 === 0) await refreshHistory();
-      if (state.tab === 'browse' || state.tab === 'queue') render();
+      // While the Links tab is collecting, the card is re-rendered from the
+      // loop itself; outside a scan, keep its queue counters honest.
+      if (state.tab === 'links' && !state.links.busy) await refreshLinks();
+      if (state.tab === 'browse' || state.tab === 'queue' || state.tab === 'links') render();
     })();
   }, 1200);
 }

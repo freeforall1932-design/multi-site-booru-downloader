@@ -25,18 +25,32 @@ export interface Downloader {
 /** Records downloads instead of touching the filesystem (tests + browser preview). */
 export class RecordingDownloader implements Downloader {
   readonly log: Array<{ url: string; filename: string; at: string }> = [];
+  /** When set, the next `download()` call throws it and the field resets. */
+  failNext: Error | null = null;
+  /** URLs that always fail (a hosting page that refuses, a dead mirror). */
+  failUrls = new Set<string>();
+  /** Failures the caller asked for, by URL, without consuming `failNext`. */
+  failMessage = 'HTTP 403 - the hosting page refused the request';
   private nextId = 1;
 
   async download(request: DownloadRequest): Promise<DownloadOutcome> {
     if (!safeUrl(request.url)) {
       throw new BooruError(`Not a valid download URL: ${request.url}`, { kind: 'parse-failure' });
     }
+    const failure = this.failNext;
+    if (failure) {
+      this.failNext = null;
+      throw failure;
+    }
+    if (this.failUrls.has(request.url)) throw new Error(this.failMessage);
     this.log.push({ url: request.url, filename: request.filename, at: new Date().toISOString() });
     return { downloadId: this.nextId++, viaFallback: false, bytes: null };
   }
 
   reset(): void {
     this.log.length = 0;
+    this.failNext = null;
+    this.failUrls.clear();
     this.nextId = 1;
   }
 }

@@ -21,9 +21,9 @@ one dock, one list, one settings screen — while staying a *booru* tool:
 │ BOORU SERVER MANAGER                        3 downloading │  header + status pill
 │ Download panel                                            │
 ├───────────────────────────────────────────────────────────┤
-│  Browse │ Queue ③ │ Servers │ Settings                    │  tab strip (deep links:
-├───────────────────────────────────────────────────────────┤  #browse #queue #servers
-│ ●  e621 post #1500000 — default profile             [Use…]│  #settings)
+│  Browse │ Queue ③ │ Links │ Servers │ Settings            │  tab strip (deep links:
+├───────────────────────────────────────────────────────────┤  #browse #queue #links
+│ ●  e621 post #1500000 — default profile             [Use…]│  #servers #settings)
 │ [thumb] #1500000 safe  [video]                            │  "this post" card
 │         [Download this post] [Add to list]                │
 ├───────────────────────────────────────────────────────────┤
@@ -56,6 +56,7 @@ one dock, one list, one settings screen — while staying a *booru* tool:
 | **Browse** | Active-tab card, "this post" card, fetch card, the list of rows | `routes/detect`, `posts/get`, `browse/search`, `queue/enqueuePosts`, `history/list` |
 | **Queue** | The same rows, focused on progress: retry failed, clear finished, reset history, clear list | `queue/list`, `queue/retryFailed`, `queue/clear`, `history/clear` |
 |  | Rows carry the media badge (`pic`/`video`), the canonical **rating chip**, the profile's site type and a `saved` badge | `queue/list` (rating is stored on the row at enqueue time) |
+| **Links** | Download **tasks** (one per creator) plus the raw link list: collect a creator's off-site links, download what is missing, rescan for new uploads, pause, export/import a package | `tasks/*`, `links/list`, `links/posts`, `links/scanPost`, `links/queue`, `links/remove`, `links/clear`, `links/export`, `links/import`, `queue/enqueueLinks` |
 | **Servers** | Full server manager (list, add/edit/validate, duplicate, delete, set default) plus diagnostics | `servers/*`, `diagnostics/info`, `userAgent/sync` |
 | **Settings** | The sectioned settings screen (identical to the options page's) | `settings/get`, `settings/save`, `servers/export|import`, `history/*`, `searches/*` |
 
@@ -86,6 +87,12 @@ queue/run { itemIds: [...] }  → only the ticked rows (the dock button)
 Newly listed rows arrive ticked; a row you untick stays unticked across refreshes
 (the selection is reconciled, not reset).
 
+A mirror link is a queue row too, with two deliberate differences: it is keyed by
+its **URL** (`link:<url>`) instead of `serverId:postId`, and it skips the adapter,
+the post lookup and the rating filter - the file is off-site, so there is nothing
+to look up. That is what lets an imported package download on a fresh profile with
+no server configured at all, and why the same URL can never be queued twice.
+
 ## Settings reference
 
 All of these live in `chrome.storage.local` and are shared by the panel, the
@@ -96,7 +103,7 @@ options page and the popup. Defaults in brackets.
 | Setting | What it does |
 | --- | --- |
 | **Toolbar click opens** [`sidepanel`] | `sidepanel` = docked panel (`openPanelOnActionClick`), `popup` = the classic popup page. The worker re-applies the stored choice every time it starts, so a `popup` profile keeps its popup. |
-| **Panel opens on** [`browse`] | Which tab the panel shows when it opens (`browse`, `queue`, `servers`, `settings`). |
+| **Panel opens on** [`browse`] | Which tab the panel shows when it opens (`browse`, `queue`, `links`, `servers`, `settings`). |
 | **Theme** [`system`] | Dark-first design; `light` exists for daytime reading. |
 
 ### 2. Multiple download
@@ -113,6 +120,14 @@ options page and the popup. Defaults in brackets.
 | Setting | What it does |
 | --- | --- |
 | **Quality** (`filePreference`) [`original`] | `original` downloads the file the site hosts; `sample` prefers the site's smaller sample rendition when it has one (`sampleUrl`), and silently falls back to the original when it does not. |
+
+### 2b. Mirror links
+
+| Setting | What it does |
+| --- | --- |
+| **Only download-looking links** [`downloads`] | What the collector keeps. `downloads` = known file hosts plus URLs that end in a file extension, look like a download (`/download/…`, `?file=…`) or carry a long hash; `any` = every external link, for posts that link somewhere unusual. Links on the site itself are never collected - those are ordinary post downloads. |
+| **Extra provider hosts** [`''`] | Which hosts count as providers, space or comma separated. A subdomain counts too (`mega.nz` matches `www.mega.nz`). |
+| **Mirror folder template** [`mirrors/{host}`] | Where link rows are saved. Its tokens describe a URL, not a post: `{host}`, `{provider}`, `{siteType}`, `{filename}`, `{ext}`, `{date}`. |
 
 ### 4. List results
 
@@ -164,6 +179,127 @@ options page and the popup. Defaults in brackets.
 Export (with or without keys), import, "delete all keys", the download-history
 counter with **Reset download history**, **Clear search history** and **Reset
 every setting** (servers and keys are never touched by a reset).
+
+## Links tab: download tasks
+
+Creator archives (Kemono, Coomer, Pawchive) are the family where the real file is
+usually *not* on the site: the post body says "the pack is on Mega" and links
+there. Those URLs are not booru posts, so the ordinary listing cannot see them.
+The Links tab turns them into a **task**: one creator on one site, the files that
+belong to them, and what happened to each one.
+
+```
+Links
+[ Profile: Pawchive (demo creator) ▾ ]   archive API
+[ fanbox/1245946                                    ]
+[ Collect links ]  [ Stop ]
+  96 collected   61 to download   35 downloaded   3 failed
+┌ 1245946 · fanbox        [pawchive] [fanbox]   partial - some files failed
+│ 35/41 file(s) saved · 3 failed · 3 still missing · scanned 2 hours ago
+│ last run 2 hours ago · 18 post(s) scanned · 6 new file(s) · 6 queued · 35 saved · 3 failed
+│ [ Download missing (6) ] [ Pause ] [ Rescan ] [ Export package ]        ✕
+│   ▸ (expand) one row per file, grouped by post, each with its own status
+└
+Import package…        Export .txt (whole list)
+Unfiled links   (a bare .txt import, a userscript export, a single URL)
+```
+
+### Collecting
+
+Pick a creator-archive profile, type a creator (`service/creatorId`, a creator
+URL, `tag:name` or plain text), press *Collect links*. The panel asks the worker
+for one listing page (`links/posts`) and then walks the posts one at a time
+(`links/scanPost`), showing progress as it goes; *Stop* finishes the post in
+flight and keeps everything found so far.
+
+The run **belongs to a task** (`tasks/begin` opens it before the first request),
+which is what makes the rest work:
+
+- every URL found in a post body is stored in `bsm.links` with its post, provider
+  and creator, and joined to the task;
+- posts already scanned are remembered, so a *Rescan* only visits new ones;
+- each run is appended to the task's history, so "what did the last pass do?" has
+  an answer even after the panel was closed.
+
+Collecting the same creator again updates that task - new posts are added, nothing
+is duplicated, and a file you already have keeps its `done` state.
+
+### The task card
+
+| Control | What it does |
+| --- | --- |
+| **Download missing (n)** | Queues every file of the task that is not saved: new files **and** earlier failures. Files already downloaded are never fetched again (the card tells you how many it skipped). |
+| **Pause** | Drops the task's files that are still waiting in the queue and returns them to "not downloaded". A download already in flight is not interrupted. |
+| **Rescan** | Re-lists the creator, scans only posts it has not seen, and adds the files they link. |
+| **Export package** | Writes both halves (below). |
+| **✕** | Removes the task. Its files stay in the list, and anything downloaded stays on disk. |
+
+The card's status line is the completion summary: **complete** (every file saved),
+**partial** (some saved, some failed - the normal outcome against volunteer
+hosting), **failed**, **in-progress**, **idle** or **empty**.
+
+### The package ("send it to a friend")
+
+*Export package* writes two files:
+
+```
+1245946_fanbox_task.json          ← the manifest: creator, service, site, a file
+                                    entry per URL (post, provider, status, saved
+                                    name), the summary and the run history
+1245946_fanbox_download_links.txt ← the grouped list, still edible by a userscript
+                                    or a download manager
+```
+
+*Import package…* (or the plain *Export .txt* / *Import* pair) reads **either
+file**: the `.json` manifest, this extension's grouped `.txt`, a userscript
+export, or a hand-written URL list (`#` lines are comments, bullets are stripped,
+duplicates collapse). Detection is by content, never by extension.
+
+What the other side gets is deliberately unglamorous and predictable:
+
+- **one task**, named after the creator, with every file listed under its post;
+- the task is **idle** - nothing downloads until someone presses *Download
+  missing* (which then honours their own "Start downloading immediately" setting);
+- files already saved on that machine are **skipped**, because a member's state
+  comes from the local link list, not from the file;
+- re-importing the same package merges into the existing task and reports what is
+  new, what is known and what was unreadable;
+- nothing but the file crosses between the two people - no server, no account, no
+  hash exchange. Each side downloads under its own rate limits.
+
+A `.txt` with no creator in it (a hand-written list, a userscript export) still
+works: the site is inferred from the post URLs in it, the creator from its
+`# Creator:` header, and the name from its filename when neither exists. Those
+links land in the task's file list; anything that belongs to no task is shown
+under *Unfiled links*.
+
+### Storing
+
+| Store | Contents |
+| --- | --- |
+| `bsm.links` | The files: URL, provider, post context, status (`new`/`queued`/`done`/`failed`), saved filename, bytes, error. Capped at 20,000. |
+| `bsm.tasks` | The tasks: identity, member ids, posts already scanned, run history. Capped at 500 tasks / 5,000 files each. |
+
+Both are ordinary `chrome.storage.local` lists with the same promise as the queue:
+closing the panel, reloading the page or restarting the worker keeps them. Every
+mutation is serialised, so two queue workers finishing two files at the same
+moment cannot lose one another's status change. A task whose last file is gone
+(cleared, or removed by hand) is dropped, so no empty cards accumulate.
+
+Hosting pages that need a login or run a script (Drive folders, Mega landing
+pages) fail honestly: the file keeps the error, the task reads *partial*, and the
+exported list stays the reliable path for a dedicated download manager.
+
+### Why it is not a `.torrent`
+
+Worth stating plainly, because the comparison is the reason the feature exists: a
+torrent verifies file pieces against a hash in the file, and survives a dead
+source through the swarm. Neither is possible here - the bytes live behind
+Drive/Mega login walls that no browser download can walk through, and the sites
+never publish a hash of the *mirrored* copy. What a package can honestly carry is
+what the exporting machine saw: the URLs, the post each came from, and what
+happened when it tried. `docs/TASKS.md` records this decision, and everything that
+was considered and parked.
 
 ## History notebooks
 

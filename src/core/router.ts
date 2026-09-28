@@ -2,21 +2,52 @@ import { BooruError } from '../shared/errors.js';
 import type {
   BooruPost,
   DownloadHistoryEntry,
+  DownloadTask,
   ExtensionSettings,
   FailureKind,
+  MirrorLink,
   SearchHistoryEntry,
   ServerConfig,
+  TaskRun,
+  TaskView,
 } from '../shared/types.js';
-import { deepClone } from '../shared/util.js';
+import { deepClone, splitTags, uniqueBy } from '../shared/util.js';
 import type { BooruClient } from './client.js';
 import type { Downloader } from './downloads.js';
 import type { DiagnosticsInfo, RouterResponse, UiRequest } from './messages.js';
-import { buildDownloadPath } from './naming.js';
+import { buildDownloadPath, sanitizePathSegment } from './naming.js';
 import type { DownloadQueue } from './queue.js';
-import { getAdapter } from './registry.js';
+import { detectAdapterForUrl, getAdapter } from './registry.js';
 import type { ServerStore } from './servers.js';
 import { toServerView } from './servers.js';
 import { DownloadHistoryStore, SearchHistoryStore } from './history.js';
+import {
+  classifyMirrorLink,
+  collectMirrorLinks,
+  formatLinkExport,
+  linkLabel,
+  mirrorLinkId,
+  ownHostsOf,
+  parseLinkExport,
+  toMirrorLink,
+} from './links.js';
+import { MirrorLinkStore } from './link-store.js';
+import { TaskStore } from './task-store.js';
+import {
+  creatorQuery,
+  formatTaskManifest,
+  manifestFilename,
+  mergeTask,
+  parseCreatorQuery,
+  parseTaskPackage,
+  planTaskRun,
+  startRun,
+  statsLabel,
+  taskCompletion,
+  taskIdFor,
+  taskNameFor,
+  taskStatsFor,
+} from './tasks.js';
 import { composeSearchTags } from './search.js';
 import type { SettingsStore } from './settings.js';
 import { STORAGE_KEYS, type StorageArea } from './storage.js';
@@ -33,11 +64,29 @@ export interface RouterDeps {
   /** Pre-built history stores (the worker reuses them with the queue). */
   history?: DownloadHistoryStore;
   searches?: SearchHistoryStore;
+  /** Collected mirror links (the Links tab); built from `storage` when omitted. */
+  links?: MirrorLinkStore;
+  /** Download tasks (one per creator); built from `storage` when omitted. */
+  tasks?: TaskStore;
   environment: 'extension' | 'preview';
   version: string;
 }
 
 export type UiMessageHandler = (request: UiRequest) => Promise<RouterResponse>;
+
+/**
+ * A readable name from an imported file's own name, used when the file carries no
+ * creator (`artist_a_links.txt` → `artist a`).
+ */
+function fileNameHint(filename: string | null | undefined): string {
+  return (filename ?? '')
+    .replace(/\.[a-z0-9]+$/i, '')
+    .replace(/[_-]+/g, ' ')
+    // `artist_a_download_links.txt` is about `artist a`, not about "download links".
+    .replace(/\b(download links|downloads|links|mirror|mirrors)\b\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 /**
  * One request handler for every surface (service worker, popup, options page and
@@ -49,6 +98,23 @@ export type UiMessageHandler = (request: UiRequest) => Promise<RouterResponse>;
 export function createRouter(deps: RouterDeps): UiMessageHandler {
   const historyStore = deps.history ?? (deps.storage ? new DownloadHistoryStore(deps.storage) : null);
   const searchStore = deps.searches ?? (deps.storage ? new SearchHistoryStore(deps.storage) : null);
+  const linkStore = deps.links ?? (deps.storage ? new MirrorLinkStore(deps.storage) : null);
+  const taskStore = deps.tasks ?? (deps.storage ? new TaskStore(deps.storage) : null);
+
+  /** The mirror-link rules currently in force, from settings + the profile. */
+  async function linkRulesFor(server: ServerConfig | null): Promise<Parameters<typeof collectMirrorLinks>[2]> {
+    const settings = await deps.settings.get();
+    return {
+      filter: settings.mirrorLinksFilter,
+      extraHosts: splitTags(settings.mirrorExtraHosts),
+      ownHosts: ownHostsOf(server),
+    };
+  }
+
+  /** Empty answer for every links/* request when no storage is available. */
+  function noLinks() {
+    return { links: [] as MirrorLink[], stats: { total: 0, new: 0, queued: 0, done: 0, failed: 0 } };
+  }
   /** Resolve a post (by URL, by id, or the default server) and save the file. */
   async function downloadPost(options: { serverId?: string | null; postId?: string; url?: string }) {
     let post: BooruPost;
@@ -90,6 +156,213 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
       conflictAction: settings.duplicateBehaviour === 'overwrite' ? 'overwrite' : 'uniquify',
     });
     return { filename: path.fullPath, post, viaFallback: outcome.viaFallback, downloadId: outcome.downloadId };
+  }
+
+  /**
+   * Removing a link from the Links tab also drops the *pending* queue row it
+   * created, so the user does not have to clean up twice. Finished rows are
+   * history and are left alone (the Queue tab has "Clear finished" for those).
+   */
+  async function dropPendingQueueRowsFor(linkIds: readonly string[]): Promise<void> {
+    const wanted = new Set(linkIds);
+    const rows = deps.queue
+      .list()
+      .filter((item) => item.kind === 'link' && item.status === 'pending' && wanted.has(item.postId))
+      .map((item) => item.id);
+    if (rows.length) await deps.queue.remove(rows);
+  }
+
+  /** A task plus its file statistics - what every task response carries. */
+  async function taskViewFor(task: DownloadTask): Promise<TaskView> {
+    const links = (await linkStore?.list()) ?? [];
+    const stats = taskStatsFor(task, links);
+    return {
+      task,
+      stats,
+      completion: taskCompletion(stats),
+      lastRun: task.runs.length ? task.runs[task.runs.length - 1]! : null,
+    };
+  }
+
+  async function taskViews(): Promise<TaskView[]> {
+    const tasks = (await taskStore?.list()) ?? [];
+    const views: TaskView[] = [];
+    // Newest first: the task someone just imported is the one they are looking at.
+    for (const task of [...tasks].reverse()) views.push(await taskViewFor(task));
+    return views;
+  }
+
+  /** The saved profile a task should be collected with (its own, else a match). */
+  async function serverForTask(task: DownloadTask): Promise<ServerConfig | null> {
+    if (task.serverId) {
+      const own = await deps.servers.get(task.serverId);
+      if (own) return own;
+    }
+    if (!task.siteType) return null;
+    return (await deps.servers.list()).find((server) => server.siteType === task.siteType) ?? null;
+  }
+
+  /**
+   * End the newest run of a task once none of its files is waiting any more, so a
+   * finished task can say how the last pass actually went.
+   */
+  async function closeRunIfSettled(task: DownloadTask): Promise<DownloadTask> {
+    if (!taskStore || !linkStore || !task.runs.length) return task;
+    const links = await linkStore.list();
+    const stats = taskStatsFor(task, links);
+    if (stats.queued > 0) return task;
+    const last = task.runs[task.runs.length - 1]!;
+    if (last.finishedAt) return task;
+    return (
+      (await taskStore.updateLastRun(task.id, {
+        finishedAt: new Date().toISOString(),
+        done: stats.done,
+        failed: stats.failed,
+        note: statsLabel(stats),
+      })) ?? task
+    );
+  }
+
+  /** Build a task record from a package (or from a collect run) and store it. */
+  async function upsertTask(input: {
+    id: string;
+    name: string;
+    siteType: ServerConfig['siteType'] | null;
+    serverId: string | null;
+    service: string | null;
+    creator: string | null;
+    query: string;
+    memberIds: string[];
+    scannedPosts?: string[];
+    runs?: TaskRun[];
+    lastScanAt?: string | null;
+    incoming?: DownloadTask | null;
+  }): Promise<{ task: DownloadTask; created: boolean }> {
+    if (!taskStore) {
+      const now = new Date().toISOString();
+      const task: DownloadTask = {
+        id: input.id,
+        name: input.name,
+        siteType: input.siteType,
+        serverId: input.serverId,
+        service: input.service,
+        creator: input.creator,
+        query: input.query,
+        createdAt: now,
+        updatedAt: now,
+        lastScanAt: input.lastScanAt ?? null,
+        memberIds: input.memberIds,
+        scannedPosts: input.scannedPosts ?? [],
+        runs: input.runs ?? [],
+      };
+      return { task, created: true };
+    }
+    const existing = await taskStore.get(input.id);
+    const now = new Date().toISOString();
+    const fresh: DownloadTask = {
+      id: input.id,
+      name: input.name,
+      siteType: input.siteType,
+      serverId: input.serverId,
+      service: input.service,
+      creator: input.creator,
+      query: input.query,
+      createdAt: input.incoming?.createdAt ?? now,
+      updatedAt: now,
+      lastScanAt: input.lastScanAt ?? null,
+      memberIds: input.memberIds,
+      scannedPosts: input.scannedPosts ?? [],
+      runs: input.runs ?? [],
+    };
+    return taskStore.upsert(existing ? mergeTask(existing, fresh) : fresh);
+  }
+
+  /**
+   * Rescan a task's creator: list the posts it has not scanned yet, harvest their
+   * links and attach them.
+   *
+   * This is what makes "run it again" meaningful months later - new posts appear,
+   * old files fail; a run adds the new ones and retries the failures (the queue
+   * side of that is `planTaskRun`). It is bounded: a rescan reads at most
+   * `maxPosts` posts and reports whether the creator has more.
+   */
+  async function rescanTask(task: DownloadTask, maxPosts: number): Promise<{ scannedPosts: number; added: number; failed: number; hasMore: boolean }> {
+    if (!linkStore) return { scannedPosts: 0, added: 0, failed: 0, hasMore: false };
+    const server = await serverForTask(task);
+    if (!server) {
+      throw new BooruError(`Task "${task.name}" has no profile to collect with`, {
+        kind: 'incomplete-config',
+        hint: 'Add a profile for this site type (Servers tab), then rescan.',
+      });
+    }
+    const query = creatorQuery(task);
+    if (!query) {
+      throw new BooruError(`Task "${task.name}" does not remember a creator to re-list`, {
+        kind: 'incomplete-config',
+        hint: 'A plain URL list cannot be rescanned - import a task package instead.',
+      });
+    }
+
+    const seen = new Set(task.scannedPosts);
+    const pageSize = 50;
+    const pageLimit = Math.max(1, Math.ceil(maxPosts / pageSize));
+    let scanned = 0;
+    let added = 0;
+    let failed = 0;
+    let hasMore = false;
+
+    for (let page = 1; page <= pageLimit; page += 1) {
+      const result = await deps.client.search(server.id, { tags: query, page, limit: pageSize });
+      const posts = uniqueBy(
+        result.posts.map((post) => ({ id: post.id, postUrl: post.postUrl, label: post.description?.trim() || `#${post.id}` })),
+        (post) => post.postUrl,
+      );
+      hasMore = result.hasMore;
+      for (const post of posts) {
+        if (scanned >= maxPosts) {
+          hasMore = true;
+          break;
+        }
+        if (seen.has(post.id)) continue;
+        try {
+          const payload = await deps.client.getPostPayload(server.id, post.id);
+          const found = collectMirrorLinks(
+            payload,
+            {
+              serverId: server.id,
+              siteType: server.siteType,
+              postId: post.id,
+              postTitle: post.label,
+              postUrl: post.postUrl,
+              creator: query,
+            },
+            await linkRulesFor(server),
+          );
+          const stored = await linkStore.add(found);
+          added += stored.addedIds.length;
+          await taskStore?.attachMembers(task.id, stored.addedIds, [post.id]);
+        } catch {
+          // One unreadable post must not end the rescan; it stays unscanned so the
+          // next attempt picks it up again.
+          failed += 1;
+        }
+        scanned += 1;
+        seen.add(post.id);
+      }
+      if (!result.hasMore) break;
+    }
+
+    await taskStore?.attachMembers(task.id, [], [...seen]);
+    return { scannedPosts: scanned, added, failed, hasMore };
+  }
+
+  /**
+   * A task with no surviving files is bookkeeping with nothing left to describe:
+   * drop it, so clearing the list does not leave empty cards behind.
+   */
+  async function pruneTasksWithoutFiles(): Promise<void> {
+    if (!taskStore || !linkStore) return;
+    await taskStore.pruneEmpty((await linkStore.list()).map((link) => link.id));
   }
 
   async function handle(request: UiRequest): Promise<RouterResponse> {
@@ -171,6 +444,481 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
         return { ...detected, server: detected.server ? toServerView(detected.server) : null };
       }
 
+      // --------------------------------------------------------------- links
+      case 'links/list': {
+        if (!linkStore) return noLinks();
+        return { links: await linkStore.list(), stats: await linkStore.stats() };
+      }
+
+      /**
+       * One listing page, reduced to the *posts* it contains.
+       *
+       * Creator archives answer with one row per attachment, so a post with
+       * four files appears four times with the same `postUrl` - the scan wants
+       * the post once. Nothing is fetched per post here: the panel walks the
+       * refs one at a time through `links/scanPost`, which keeps progress
+       * visible and the request spacing honest.
+       */
+      case 'links/posts': {
+        const settings = await deps.settings.get();
+        const composed = composeSearchTags({ tags: request.payload.query, blacklist: settings.tagBlacklist });
+        const result = await deps.client.search(request.payload.serverId, {
+          tags: composed.tags,
+          page: request.payload.page,
+          limit: 50,
+        });
+        const posts = uniqueBy(
+          result.posts.map((post) => ({
+            id: post.id,
+            label: post.description?.trim() || `#${post.id}`,
+            postUrl: post.postUrl,
+          })),
+          (post) => post.postUrl,
+        );
+        return { posts, hasMore: result.hasMore, totalCount: result.totalCount, page: result.page };
+      }
+
+      /**
+       * Read one post's raw payload and harvest its off-site download links.
+       *
+       * This is the extension's version of the "open every post of the creator
+       * and read the links" userscript loop - except the page is never parsed:
+       * the same public API the downloader already uses answers with the post
+       * body, and the URLs are pulled out of that.
+       */
+      case 'links/scanPost': {
+        if (!linkStore) return { added: [] as MirrorLink[], duplicates: 0, total: 0 };
+        const { serverId, postId } = request.payload;
+        const server = await deps.servers.get(serverId);
+        if (!server) {
+          throw new BooruError(`Unknown server "${serverId}"`, {
+            kind: 'incomplete-config',
+            hint: 'Pick the profile the links should be collected with, then try again.',
+          });
+        }
+        const payload = await deps.client.getPostPayload(server.id, postId);
+        const found = collectMirrorLinks(
+          payload,
+          {
+            serverId: server.id,
+            siteType: server.siteType,
+            postId,
+            postTitle: request.payload.postTitle ?? null,
+            postUrl: request.payload.postUrl ?? null,
+            creator: request.payload.creator ?? null,
+          },
+          await linkRulesFor(server),
+        );
+        const result = await linkStore.add(found);
+        // A scan that belongs to a task joins its member list, which is what makes
+        // "download everything again" and "what is new?" answerable later.
+        if (request.payload.taskId && taskStore) {
+          const task = await taskStore.get(request.payload.taskId);
+          if (task) await taskStore.attachMembers(task.id, found.map((link) => link.id), [postId]);
+        }
+        return {
+          added: found.filter((link) => result.addedIds.includes(link.id)),
+          duplicates: result.updated,
+          total: result.total,
+        };
+      }
+
+      /** Put collected links on the download queue (they download as `link` rows). */
+      case 'links/queue': {
+        if (!linkStore) return { queued: 0, skipped: 0, invalid: 0, ...noLinks() };
+        const wanted = new Set(request.payload.ids);
+        const chosen = (await linkStore.list()).filter((link) => wanted.has(link.id));
+        const result = await deps.queue.enqueueLinks(
+          chosen.map((link) => ({
+            url: link.url,
+            label: linkLabel(link),
+            postUrl: link.postUrl,
+            serverId: link.serverId,
+          })),
+        );
+        for (const link of chosen) {
+          if (link.status !== 'done') await linkStore.mark(link.id, 'queued');
+        }
+        return { queued: result.added, skipped: result.skipped, invalid: result.invalid, links: await linkStore.list(), stats: await linkStore.stats() };
+      }
+
+      case 'links/remove': {
+        if (!linkStore) return { removed: 0, ...noLinks() };
+        const removed = await linkStore.remove(request.payload.ids);
+        await dropPendingQueueRowsFor(request.payload.ids);
+        await pruneTasksWithoutFiles();
+        return { removed, links: await linkStore.list(), stats: await linkStore.stats() };
+      }
+
+      case 'links/clear': {
+        if (!linkStore) return { removed: 0, ...noLinks() };
+        const scope = request.payload.scope ?? 'all';
+        const before = (await linkStore.list()).map((link) => link.id);
+        const removed = await linkStore.clear(scope);
+        const surviving = new Set((await linkStore.list()).map((link) => link.id));
+        await dropPendingQueueRowsFor(before.filter((id) => !surviving.has(id)));
+        // A task whose files are all gone is bookkeeping with nothing left to
+        // describe; drop it so the Links tab does not accumulate ghosts.
+        await pruneTasksWithoutFiles();
+        return { removed, links: await linkStore.list(), stats: await linkStore.stats() };
+      }
+
+      /** Render the `.txt` the Links tab downloads (and can import again). */
+      case 'links/export': {
+        if (!linkStore) return { text: '', filename: 'mirror-links.txt', count: 0, grouping: 'post' as const };
+        const links = await linkStore.list();
+        const grouping = request.payload.grouping ?? 'post';
+        const firstServerId = links.find((link) => link.serverId)?.serverId ?? null;
+        const server = firstServerId ? await deps.servers.get(firstServerId) : null;
+        const creator = links.find((link) => link.creator)?.creator ?? null;
+        const text = formatLinkExport(links, {
+          grouping,
+          creator,
+          server: server ? `${server.label} (${server.baseUrl})` : (links[0]?.siteType ?? null),
+          version: deps.version,
+        });
+        const safeCreator = sanitizePathSegment(creator ?? server?.label ?? 'mirror', 'mirror').replace(/\s+/g, '_');
+        return { text, filename: `${safeCreator}_download_links.txt`, count: links.length, grouping };
+      }
+
+      /** Read one back: rebuild the list (and optionally the queue) from a file. */
+      case 'links/import': {
+        if (!linkStore) return { parsed: 0, added: 0, updated: 0, queued: 0, invalid: 0, ...noLinks() };
+        const parsed = parseLinkExport(request.payload.text);
+        const server = request.payload.serverId ? await deps.servers.get(request.payload.serverId) : null;
+        const now = new Date();
+        const records: MirrorLink[] = [];
+        let invalid = 0;
+        for (const url of parsed.links) {
+          // An imported file is an explicit instruction: no provider/format
+          // filter and no own-host rule is applied, only validity.
+          const verdict = classifyMirrorLink(url, { filter: 'any' });
+          if (!verdict.ok) {
+            invalid += 1;
+            continue;
+          }
+          const context = parsed.contexts.get(url) ?? {};
+          records.push(
+            toMirrorLink(verdict, {
+              serverId: server?.id ?? null,
+              siteType: server?.siteType ?? null,
+              postId: null,
+              postTitle: context.postTitle ?? null,
+              postUrl: context.postUrl ?? null,
+              creator: context.creator ?? null,
+            }, now),
+          );
+        }
+        const result = await linkStore.add(records);
+        let queued = 0;
+        if (request.payload.queue && records.length) {
+          const enqueued = await deps.queue.enqueueLinks(
+            records.map((record) => ({ url: record.url, label: linkLabel(record), postUrl: record.postUrl, serverId: record.serverId })),
+          );
+          queued = enqueued.added;
+          for (const record of records) {
+            const stored = await linkStore.byId(record.id);
+            if (stored && stored.status !== 'done') await linkStore.mark(record.id, 'queued');
+          }
+        }
+        return {
+          parsed: parsed.links.length,
+          added: result.added,
+          updated: result.updated,
+          queued,
+          invalid,
+          links: await linkStore.list(),
+          stats: await linkStore.stats(),
+        };
+      }
+
+      // --------------------------------------------------------------- tasks
+      /**
+       * The task list. A task is one creator plus the files that belong to them:
+       * the unit a package is exported as, and the unit "run it again" applies to.
+       */
+      case 'tasks/list': {
+        return { tasks: await taskViews() };
+      }
+
+      /** Open (or fetch) the task a collect run belongs to, before scanning. */
+      case 'tasks/begin': {
+        const server = await deps.servers.get(request.payload.serverId);
+        if (!server) {
+          throw new BooruError(`Unknown server "${request.payload.serverId}"`, {
+            kind: 'incomplete-config',
+            hint: 'Pick the profile the links should be collected with, then try again.',
+          });
+        }
+        const query = request.payload.query.trim();
+        const parsed = parseCreatorQuery(query);
+        const id = taskIdFor({ siteType: server.siteType, service: parsed.service, creator: parsed.creator, query });
+        const { task, created } = await upsertTask({
+          id,
+          name: request.payload.name?.trim() || taskNameFor({ service: parsed.service, creator: parsed.creator, query }),
+          siteType: server.siteType,
+          serverId: server.id,
+          service: parsed.service,
+          creator: parsed.creator,
+          query,
+          memberIds: [],
+        });
+        return { task: await taskViewFor(task), created };
+      }
+
+      /**
+       * "Pick from file": read a task package (or a plain link list) and rebuild
+       * the job from it.
+       *
+       * The file is the instruction - imported URLs are added with no provider
+       * filter and no own-host rule - and a package that is already known merges
+       * into its task instead of duplicating it. Nothing downloads until the user
+       * presses Start.
+       */
+      case 'tasks/import': {
+        if (!linkStore || !taskStore) {
+          return { kind: 'unknown' as const, created: false, parsed: 0, added: 0, updated: 0, invalid: 0, task: null, error: 'Storage is unavailable.' };
+        }
+        const parsed = parseTaskPackage(request.payload.text);
+        const server = request.payload.serverId ? await deps.servers.get(request.payload.serverId) : null;
+
+        // Plain list: reuse the tolerant reader (bullets, comments, duplicates).
+        const list = parsed.kind === 'json' ? null : parseLinkExport(request.payload.text);
+        const urls = parsed.kind === 'json' ? parsed.urls : (list?.links ?? []);
+        if (parsed.kind === 'unknown') {
+          return { kind: 'unknown' as const, created: false, parsed: 0, added: 0, updated: 0, invalid: 0, task: null, error: parsed.error };
+        }
+        if (!urls.length) {
+          return {
+            kind: parsed.kind,
+            created: false,
+            parsed: 0,
+            added: 0,
+            updated: 0,
+            invalid: 0,
+            task: null,
+            error: 'No http(s) link was found in this file.',
+          };
+        }
+
+        const now = new Date();
+        const records: MirrorLink[] = [];
+        let invalid = 0;
+        for (const url of urls) {
+          const verdict = classifyMirrorLink(url, { filter: 'any' });
+          if (!verdict.ok) {
+            invalid += 1;
+            continue;
+          }
+          // Post context comes from the manifest when there is one, else from the
+          // `# Post:` headers of a grouped list - so imported rows still group.
+          const packaged = parsed.files.get(mirrorLinkId(verdict.url)) ?? null;
+          const fromText = list?.contexts.get(verdict.url) ?? null;
+          records.push(
+            toMirrorLink(
+              verdict,
+              {
+                serverId: server?.id ?? null,
+                siteType: (server?.siteType ?? parsed.task?.siteType ?? null) as MirrorLink['siteType'],
+                postId: packaged?.postId ?? null,
+                postTitle: packaged?.postTitle ?? fromText?.postTitle ?? null,
+                postUrl: packaged?.postUrl ?? fromText?.postUrl ?? null,
+                creator: parsed.creator ?? fromText?.creator ?? null,
+              },
+              now,
+            ),
+          );
+        }
+        const stored = await linkStore.add(records);
+
+        // Who the task is about: the manifest says it outright; a `.txt` list says
+        // it in its `# Creator:` header (`fanbox/1245946`); only a list with
+        // neither falls back to the file's own name.
+        const headerCreator =
+          parsed.creator ??
+          [...(list?.contexts.values() ?? [])].map((context) => context.creator ?? null).find((value): value is string => !!value) ??
+          null;
+        const fromHeader = headerCreator ? parseCreatorQuery(headerCreator) : { service: null, creator: null };
+        // A `.txt` names no site type, but its `# Post:` URLs do - and knowing it
+        // is what makes the text half and the manifest half land on the *same*
+        // task instead of two.
+        const siteFromPosts =
+          parsed.task?.siteType ??
+          server?.siteType ??
+          [...(list?.contexts.values() ?? [])]
+            .map((context) => (context.postUrl ? detectAdapterForUrl(context.postUrl)?.adapter.siteType ?? null : null))
+            .find((value): value is ServerConfig['siteType'] => !!value) ??
+          null;
+        const identity = {
+          siteType: siteFromPosts as ServerConfig['siteType'] | null,
+          service: parsed.task?.service ?? fromHeader.service,
+          creator: parsed.task?.creator ?? fromHeader.creator,
+          query: parsed.task?.query ?? headerCreator ?? '',
+        };
+        const hint = fileNameHint(request.payload.filename);
+        const id =
+          parsed.kind === 'json' && parsed.task
+            ? parsed.task.id
+            : taskIdFor({ ...identity, query: identity.query || hint });
+        const { task, created } = await upsertTask({
+          id,
+          name: parsed.task?.name ?? (identity.creator ? taskNameFor(identity) : hint || 'Imported links'),
+          siteType: identity.siteType,
+          serverId: server?.id ?? null,
+          service: identity.service,
+          creator: identity.creator,
+          query: identity.query || taskNameFor(identity),
+          memberIds: records.map((record) => record.id),
+          scannedPosts: parsed.task?.scannedPosts ?? [],
+          runs: parsed.task?.runs ?? [],
+          lastScanAt: parsed.task?.lastScanAt ?? null,
+        });
+        return {
+          kind: parsed.kind,
+          created,
+          parsed: urls.length,
+          added: stored.added,
+          updated: stored.updated,
+          invalid,
+          task: await taskViewFor(task),
+          error: null,
+        };
+      }
+
+      /** Write the package: the `.json` manifest and the grouped `.txt` list. */
+      case 'tasks/export': {
+        if (!taskStore || !linkStore) return null;
+        const task = await taskStore.get(request.payload.taskId);
+        if (!task) {
+          throw new BooruError(`Unknown task "${request.payload.taskId}"`, {
+            kind: 'unknown',
+            hint: 'Refresh the Links tab - the task may have been removed.',
+          });
+        }
+        const links = (await linkStore.list()).filter((link) => task.memberIds.includes(link.id));
+        const server = task.serverId ? await deps.servers.get(task.serverId) : null;
+        const manifest = formatTaskManifest(task, links, { tool: `Booru Server Manager ${deps.version}` });
+        const text = formatLinkExport(links, {
+          grouping: 'post',
+          creator: creatorQuery(task),
+          server: server ? `${server.label} (${server.baseUrl})` : task.name,
+          version: deps.version,
+        });
+        const base = sanitizePathSegment(task.name, 'task').replace(/\s+/g, '_');
+        return {
+          files: [
+            { filename: manifestFilename(base), text: manifest, mime: 'application/json' },
+            { filename: `${base}_download_links.txt`, text, mime: 'text/plain' },
+          ],
+          count: links.length,
+          task: await taskViewFor(task),
+        };
+      }
+
+      /**
+       * Start a task: queue every file it is missing (new ones *and* retries),
+       * never one that is already saved unless the caller asks for `mode: 'all'`.
+       */
+      case 'tasks/run': {
+        if (!taskStore || !linkStore) return null;
+        let task = await taskStore.get(request.payload.taskId);
+        if (!task) {
+          throw new BooruError(`Unknown task "${request.payload.taskId}"`, {
+            kind: 'unknown',
+            hint: 'Refresh the Links tab - the task may have been removed.',
+          });
+        }
+        const links = await linkStore.list();
+        const plan = planTaskRun(task, links, request.payload.mode ?? 'missing');
+        const chosen = links.filter((link) => plan.ids.includes(link.id));
+        const result = await deps.queue.enqueueLinks(
+          chosen.map((link) => ({
+            url: link.url,
+            label: linkLabel(link),
+            postUrl: link.postUrl,
+            serverId: link.serverId,
+          })),
+        );
+        for (const link of chosen) {
+          if (link.status !== 'done') await linkStore.mark(link.id, 'queued');
+        }
+        task = (await taskStore.recordRun(task.id, startRun({ queued: result.added, note: statsLabel(taskStatsFor(task, await linkStore.list())) }))) ?? task;
+        const settings = await deps.settings.get();
+        const shouldStart = request.payload.start ?? settings.autoStartQueue;
+        if (shouldStart && result.added > 0) void deps.queue.run();
+        return {
+          task: await taskViewFor(task),
+          queued: result.added,
+          skipped: result.skipped,
+          invalid: result.invalid,
+          started: shouldStart && result.added > 0,
+          plan: {
+            alreadyDone: plan.alreadyDone,
+            alreadyQueued: plan.alreadyQueued,
+            retrying: plan.retrying,
+            total: plan.total,
+          },
+        };
+      }
+
+      /** Pause a task: drop its pending rows; nothing in flight is killed. */
+      case 'tasks/pause': {
+        if (!taskStore || !linkStore) return null;
+        const task = await taskStore.get(request.payload.taskId);
+        if (!task) {
+          throw new BooruError(`Unknown task "${request.payload.taskId}"`, { kind: 'unknown' });
+        }
+        await dropPendingQueueRowsFor(task.memberIds);
+        const after = await closeRunIfSettled(task);
+        return { task: await taskViewFor(after), cancelled: 0 };
+      }
+
+      /** Look for posts the task has not seen yet and add the files they link. */
+      case 'tasks/rescan': {
+        if (!taskStore || !linkStore) return null;
+        const task = await taskStore.get(request.payload.taskId);
+        if (!task) {
+          throw new BooruError(`Unknown task "${request.payload.taskId}"`, { kind: 'unknown' });
+        }
+        const maxPosts = Math.min(Math.max(1, request.payload.maxPosts ?? 200), 1000);
+        const outcome = await rescanTask(task, maxPosts);
+        const fresh = (await taskStore.get(task.id)) ?? task;
+        const run = startRun({
+          scannedPosts: outcome.scannedPosts,
+          added: outcome.added,
+          note: `${outcome.scannedPosts} new post(s) scanned, ${outcome.added} file(s) added`,
+        });
+        let updated = (await taskStore.recordRun(fresh.id, run)) ?? fresh;
+        updated = (await taskStore.attachMembers(updated.id, [], [])) ?? updated;
+        const links = await linkStore.list();
+        updated =
+          (await taskStore.updateLastRun(updated.id, {
+            finishedAt: new Date().toISOString(),
+            done: taskStatsFor(updated, links).done,
+            failed: outcome.failed,
+            note: outcome.failed ? `${outcome.failed} post(s) could not be read` : run.note,
+          })) ?? updated;
+        return {
+          task: await taskViewFor(updated),
+          scannedPosts: outcome.scannedPosts,
+          added: outcome.added,
+          failed: outcome.failed,
+          hasMore: outcome.hasMore,
+        };
+      }
+
+      /** Remove a task; its files stay in the link list unless told otherwise. */
+      case 'tasks/remove': {
+        if (!taskStore || !linkStore) return { removed: false };
+        const task = await taskStore.get(request.payload.taskId);
+        if (!task) return { removed: false };
+        if (request.payload.keepFiles === false) {
+          await linkStore.remove(task.memberIds);
+          await dropPendingQueueRowsFor(task.memberIds);
+        }
+        return { removed: await taskStore.remove(task.id) };
+      }
+
       // --------------------------------------------------------------- queue
       case 'queue/list': {
         const settings = await deps.settings.get();
@@ -186,6 +934,13 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
         // Rating filtering plus de-duplication live in the queue so the message
         // layer stays a thin translation of UI intent.
         const result = await deps.queue.enqueuePosts(request.payload.serverId, request.payload.posts);
+        return { ...result, summary: deps.queue.summary() };
+      }
+
+      case 'queue/enqueueLinks': {
+        // Mirror links skip the adapter and the rating filter: the file is not
+        // on the site, so there is nothing to look up and nothing to rate.
+        const result = await deps.queue.enqueueLinks(request.payload.links, request.payload.serverId ?? '');
         return { ...result, summary: deps.queue.summary() };
       }
 

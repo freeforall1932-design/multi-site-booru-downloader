@@ -1,7 +1,8 @@
 # Manual test plan
 
-The automated suite (270 tests) covers the adapters, the shared services, the
-panel's shared logic and the message protocol. This document covers what only a
+The automated suite (478 tests) covers the adapters, the shared services, the
+panel's shared logic, the mirror-link rules, download tasks and the message
+protocol. This document covers what only a
 human can check: the real extension in a real browser, the UI states, and the
 failure messages a user sees.
 
@@ -31,6 +32,7 @@ Test profiles you may want, in the order that makes later tests easy:
 | `Danbooru main` | danbooru | your username + API key |
 | `Gelbooru main` | gelbooru | API key + numeric user id |
 | `e926 read-only` | e621 (base URL `https://e926.net`) | none |
+| `Pawchive demo` | pawchive (base URL `https://pawchive.pw`) | none — creator archives are anonymous. In the preview this already exists as *Pawchive (demo creator)* |
 
 ---
 
@@ -85,7 +87,8 @@ covers the same flow with mock data.
 | 1.2 | In the options frame, go to **Browse**, search `cat` | 24-post mock dataset, tiles show previews and rating chips |
 | 1.3 | Add a server in the options frame, then reload the page | The new server is still there (shared `localStorage` namespace) |
 | 1.4 | Add a server in the options frame, open the popup frame | The same server list appears in the popup (shared state) |
-| 1.5 | Press **Reset preview data** on the harness page | Page reloads; the four demo servers are back and no user changes remain |
+| 1.5 | Press **Reset preview data** on the harness page | Page reloads; the five demo servers are back (e621, Danbooru, Gelbooru, e926, Pawchive) and no user changes remain |
+| 1.5a | Open the panel iframe on the **Links** tab and collect `fanbox/1245946` | The demo creator's posts are scanned offline and their mirror links (Mega, Drive, Pixeldrain, MediaFire, Catbox, Dropbox) are collected - see section 5a |
 | 1.6 | Search with tag `force:429` | Red error chip: *Rate limited* + a hint about lowering the request interval |
 | 1.7 | Search with tag `force:401` | *Authentication failed* (not an endpoint message) |
 | 1.8 | Search with tag `force:html` | *Endpoint mismatch* — explains the base URL points at a web page |
@@ -177,6 +180,59 @@ Form behaviour:
 | 5.10 | Close the options page during a run, reopen the queue | Progress is intact (persisted state), running items resume from pending after a browser restart |
 | 5.11 | Queue a post on a server whose profile was deleted meanwhile | Skip with *Unsupported site type* reason instead of an infinite retry loop |
 
+## 5a. Mirror links (Links tab) [V]
+
+The preview harness ships a demo creator whose posts carry mirror links, so the
+whole flow - collect, queue, export, import - can be walked without a live site.
+On a real profile, `pawchive` / `kemono` / `coomer` are the site types that can
+collect (the tab says *archive API*); any other profile disables the Collect
+button on purpose.
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 5a.1 | Panel → **Links**, pick the Pawchive profile | Card renders with an empty state; *Collect links* stays disabled until a query is typed |
+| 5a.2 | Type `fanbox/1245946`, press **Collect links** | Progress strip ("Scanned n/N"), then rows grouped under post titles; summary reads `6 collected`, and every provider row has a badge (Mega, Google Drive, Pixeldrain, MediaFire, Catbox, Dropbox) |
+| 5a.3 | Inspect the collected rows | No `pawchive.pw` or `n1.pawchive.pw` rows (the site's own files are ordinary post downloads) and no `example.com/gallery/1234` row (the default filter keeps downloads only) |
+| 5a.4 | Press **Stop** mid-collection | It stops after the post in flight; everything found so far is kept and the button returns to *Collect links* |
+| 5a.5 | Settings → *Mirror links* → set **Only download-looking links** to *Every external link*, re-collect | The gallery link now appears; the toolbar button in the Links tab reads `filter: every external link` |
+| 5a.6 | Tick a few rows → **Add to download queue (n)** | Toast; the Queue tab shows the rows with a `link` badge; the Links rows read *in the queue*; nothing hits the site's own API |
+| 5a.7 | Run the queue | Link rows download through the browser's downloader into `mirrors/<host>/…` (per the template), slowly, one URL per row; a row to a hosting page that needs a login fails and keeps its error text |
+| 5a.8 | **Export .txt** (grouped by post) | A `<creator>_download_links.txt` file downloads; it starts with `# Booru Server Manager — collected mirror links`, lists `# Post: <title> — <url>` sections and one `- <url>` line per link |
+| 5a.9 | **Clear list** → confirm | The list empties; pending link rows leave the queue; a running download is not killed; the file on disk stays |
+| 5a.10 | **Import .txt…** → pick the file just exported | Rows come back grouped by their post titles, summary matches the export, the dock notice reports how many were added/known/unreadable; new rows arrive ticked |
+| 5a.11 | Press **Add to download queue (n)** right after importing | The imported URLs queue (and download) exactly like collected ones - no profile is needed for the rows themselves |
+| 5a.12 | Import a hand-written list (`Mega link`, a plain URL, a `•` bullet, a nonsense line) | Valid URLs are added regardless of provider, the nonsense line is counted as unreadable, nothing throws |
+| 5a.13 | Reload the panel (and the browser) | The collected list and each row's status (queued/done/failed, saved filename) are still there - `bsm.links` is persistent storage |
+| 5a.14 | Feed a userscript export (the `Creator:`/`Collected:` preamble, bare URLs) into **Import .txt…** | It imports: `#` lines are comments, bullets are stripped, duplicates collapse |
+| 5a.15 | Set **Mirror folder template** to `mirrors/{provider}/{date}` and queue one link | The saved path follows the URL tokens (`mirrors/Mega/2026-09-29/<name>`), not the post's naming template |
+
+## 5b. Download tasks and the package [V]
+
+The preview's demo creator is enough to walk the whole "send it to a friend" flow:
+collect, download the missing files, pause, rescan, export the package, then import
+that same file into a **fresh** preview (Reset preview data clears it) and watch it
+come back as one idle task.
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 5b.1 | Links tab → *Collect links* for `fanbox/1245946` | One **task card** appears, named `1245946 · fanbox`, with a `pawchive` / `fanbox` badge, `n/n file(s) saved`, and a *Download missing (n)* button |
+| 5b.2 | Click the ▸ on the card | The card expands into one row per file, each with its provider badge, its post, its status and its URL |
+| 5b.3 | Press **Download missing (n)** | Toast + notice ("n file(s) queued"); the Queue tab shows the rows; the card turns *downloading* and the counters move as files finish; it ends on **complete** |
+| 5b.4 | Press it again | "Nothing left to download" — every file is already saved, and the card says how many were skipped (`n / n done`) |
+| 5b.5 | **Pause** while files are queued | The task's waiting files leave the queue, the card goes back to "n not downloaded" and the button says *Download missing* again; a download already running is not killed |
+| 5b.6 | Break one link's host (edit the row's URL in devtools, or import a list with a dead URL), then Download missing | Only that file fails; the card reads **partial - some files failed**, the file keeps its error text, and the next *Download missing* queues the failed file again (and never the saved ones) |
+| 5b.7 | **Rescan** a task that was collected already | "0 new post(s) scanned" — the second pass is incremental, it does not walk the creator again from scratch |
+| 5b.8 | Reload the panel and the browser | Task, files, statuses, run history and card expansion state survive (`bsm.tasks`, `bsm.links`) |
+| 5b.9 | **Export package** | Two files download: `<name>_task.json` (manifest with `files` and `runs`) and `<name>_download_links.txt` (grouped list). Both open as plain text |
+| 5b.10 | Open the manifest in a text editor | Readable: `format`, `task` (id/name/site/service/creator), `summary` (total/done/failed/pending/completion), `files` (url, provider, post, status, filename) and `runs` |
+| 5b.11 | Harness page → **Reset preview data**, then Links tab → *Import package…* → pick the `.json` | One task comes back, **idle**, with the same name and file count; the notice reports how many were new vs already known; nothing downloads |
+| 5b.12 | Press **Download missing** on the fresh copy | It queues every file (no server/profile is needed on this side at all) and the queue downloads them slowly |
+| 5b.13 | Import the same package a second time | Merges into the same task: `0 new`, everything reported as already known, statuses unchanged |
+| 5b.14 | Import only the `.txt` half | The same task id is used (the site comes from the post URLs), the files keep their post titles, and they group by post in the expanded card |
+| 5b.15 | Import a userscript export (`Creator:`/`Collected:` preamble, bare URLs) | It imports as a task named after its creator header; `#` lines are ignored, bullets stripped |
+| 5b.16 | Import a hand-written list with no creator (`artist_a_links.txt`) | The task is named `artist a`, its links are "unfiled" until re-imported as a package, and nothing throws on a nonsense line (counted as unreadable) |
+| 5b.17 | Remove a task with ✕ | The card disappears, the files stay in the list (and on disk); *Clear list* then removes the files and drops any task with nothing left |
+
 ## 6. Downloads and naming [V]
 
 | # | Steps | Expected |
@@ -192,7 +248,8 @@ Form behaviour:
 
 The options page and the panel's Settings tab render the same sections; check one
 of each area rather than all of them twice: *Global behaviour* (toolbar mode),
-*Multiple download* (concurrency, spacing, retries, duplicates), *List results*
+*Multiple download* (concurrency, spacing, retries, duplicates), *Mirror links*
+(filter, extra hosts, folder template), *List results*
 (media filter, page cap, queue rows, skip downloaded), *Search behaviour* (suffix,
 blacklist, search history), *Name template* (checkboxes + custom + preview),
 *Interface*, *Advanced behaviour*, *Server credentials*, *Download history*.

@@ -4,15 +4,19 @@ import type {
   ExtensionSettings,
   FailureKind,
   QueueItem,
+  QueueItemKind,
   QueueSummary,
   Rating,
   ServerConfig,
 } from '../shared/types.js';
 import { historyKey, type DownloadHistoryStore } from './history.js';
-import { createId, deepClone } from '../shared/util.js';
+import { createId, deepClone, isValidHttpUrl } from '../shared/util.js';
+import { mirrorLinkId } from './links.js';
+import type { MirrorLinkStore } from './link-store.js';
+import type { TaskStore } from './task-store.js';
 import type { BooruClient } from './client.js';
 import type { Downloader } from './downloads.js';
-import { buildDownloadPath } from './naming.js';
+import { buildDownloadPath, buildMirrorPath } from './naming.js';
 import { createAdapterContext, requireAdapter } from './registry.js';
 import type { ServerStore } from './servers.js';
 import type { SettingsStore } from './settings.js';
@@ -26,6 +30,10 @@ export interface QueueDeps {
   downloader: Downloader;
   /** Optional download notebook: written on success, read by "skip downloaded". */
   history?: DownloadHistoryStore;
+  /** Optional mirror-link list: keeps a link row's own status in sync. */
+  links?: MirrorLinkStore;
+  /** Optional task list: closes a task's run record once its files settle. */
+  tasks?: TaskStore;
   http?: HttpClient;
   /** Explicit per-server rate spacing override (defaults to adapter + settings). */
   spacingMs?: number;
@@ -38,6 +46,10 @@ export interface EnqueueInput {
   label?: string;
   postUrl?: string;
   rating?: Rating | null;
+  /** `link` rows download `url` directly; omitted means a normal post row. */
+  kind?: QueueItemKind;
+  /** The mirror URL of a `link` row. */
+  url?: string;
 }
 
 /**
@@ -49,6 +61,27 @@ export interface EnqueueCandidate {
   label?: string;
   postUrl?: string;
   rating?: Rating;
+}
+
+/** One collected mirror link, as the Links tab hands it to the queue. */
+export interface EnqueueLinkInput {
+  url: string;
+  label?: string;
+  /** The post the link was collected from, kept for the row's link-out. */
+  postUrl?: string | null;
+  serverId?: string | null;
+}
+
+/**
+ * De-duplication key for a queue row.
+ *
+ * Post rows are unique per `serverId:postId`; link rows are unique per URL,
+ * because the same file is routinely linked from several posts and from several
+ * creators' posts.
+ */
+export function queueItemKey(item: Pick<QueueItem, 'kind' | 'serverId' | 'postId' | 'url'>): string {
+  if (item.kind === 'link') return `link:${item.url ?? ''}`;
+  return `${item.serverId}:${item.postId}`;
 }
 
 /**
@@ -82,7 +115,10 @@ export class DownloadQueue {
     // them as pending again so the work is not silently dropped.
     this.items = items.map((item) => ({
       ...item,
-      // Rows queued before the rating/media columns existed have no rating.
+      // Rows queued before the rating/media columns existed have no rating, and
+      // every row saved before the Links tab existed is a post row.
+      kind: item.kind ?? ('post' as const),
+      url: item.url ?? null,
       rating: item.rating ?? null,
       status: item.status === 'running' ? ('pending' as const) : item.status,
     }));
@@ -131,12 +167,14 @@ export class DownloadQueue {
   async enqueue(inputs: EnqueueInput[]): Promise<{ added: number; skipped: number }> {
     await this.ensureLoaded();
     const existing = new Set(
-      this.items.filter((item) => item.status === 'pending' || item.status === 'running').map((item) => `${item.serverId}:${item.postId}`),
+      this.items
+        .filter((item) => item.status === 'pending' || item.status === 'running')
+        .map((item) => queueItemKey(item)),
     );
     let added = 0;
     let skipped = 0;
     for (const input of inputs) {
-      const key = `${input.serverId}:${input.postId}`;
+      const key = input.kind === 'link' ? `link:${input.url ?? ''}` : `${input.serverId}:${input.postId}`;
       if (existing.has(key)) {
         skipped += 1;
         continue;
@@ -149,6 +187,8 @@ export class DownloadQueue {
         postId: input.postId,
         label: input.label ?? `post ${input.postId}`,
         postUrl: input.postUrl ?? '',
+        kind: input.kind ?? 'post',
+        url: input.url ?? null,
         rating: input.rating ?? null,
         status: 'pending',
         attempts: 0,
@@ -163,6 +203,28 @@ export class DownloadQueue {
     }
     await this.persist();
     return { added, skipped };
+  }
+
+  /**
+   * Enqueue collected mirror links.
+   *
+   * The default `serverId` is the profile the links were collected with; it is
+   * provenance, not a requirement - a link row downloads with no server at all
+   * (that is the whole point of importing a `.txt` on a fresh profile).
+   */
+  async enqueueLinks(inputs: readonly EnqueueLinkInput[], defaultServerId = ''): Promise<{ added: number; skipped: number; invalid: number }> {
+    const valid = inputs.filter((input) => isValidHttpUrl(input.url));
+    const result = await this.enqueue(
+      valid.map((input) => ({
+        kind: 'link' as const,
+        serverId: input.serverId ?? defaultServerId,
+        postId: mirrorLinkId(input.url),
+        url: input.url,
+        label: input.label?.trim() || input.url,
+        postUrl: input.postUrl || input.url,
+      })),
+    );
+    return { ...result, invalid: inputs.length - valid.length };
   }
 
   /** Enqueue every post from a listing result, honouring the rating filter. */
@@ -196,6 +258,9 @@ export class DownloadQueue {
     if (!item || item.status === 'done') return;
     item.status = 'canceled';
     item.updatedAt = new Date(this.now()).toISOString();
+    // A canceled link row puts its link back to "new" so the Links tab can queue
+    // it again with one click.
+    if (item.kind === 'link') await this.deps.links?.release([item.postId]);
     await this.persist();
   }
 
@@ -235,7 +300,12 @@ export class DownloadQueue {
     await this.ensureLoaded();
     const wanted = new Set(itemIds);
     const before = this.items.length;
+    const removed = this.items.filter((item) => wanted.has(item.id));
     this.items = this.items.filter((item) => !wanted.has(item.id));
+    // Removing a queued link row releases the link itself; the collected list in
+    // the Links tab is a separate list and keeps the URL.
+    const linkIds = removed.filter((item) => item.kind === 'link').map((item) => item.postId);
+    if (linkIds.length) await this.deps.links?.release(linkIds);
     await this.persist();
     return before - this.items.length;
   }
@@ -297,12 +367,17 @@ export class DownloadQueue {
         next.bytes = outcome.bytes;
         next.error = null;
         next.errorKind = null;
+        await this.syncLinkRow(next, 'done', { filename: outcome.filename, bytes: outcome.bytes, error: null });
       } catch (error) {
         const booruError =
           error instanceof BooruError ? error : new BooruError(error instanceof Error ? error.message : String(error), { kind: 'unknown' });
         next.status = booruError.kind === 'unsupported-site' ? 'skipped' : 'failed';
         next.error = booruError.message;
         next.errorKind = booruError.kind as FailureKind;
+        await this.syncLinkRow(next, next.status === 'skipped' ? 'new' : 'failed', {
+          error: booruError.message,
+          attempts: next.attempts,
+        });
       } finally {
         next.updatedAt = new Date(this.now()).toISOString();
         await this.persist();
@@ -310,7 +385,68 @@ export class DownloadQueue {
     }
   }
 
+  /** Keep the Links tab's copy of a link's state in step with the queue row. */
+  private async syncLinkRow(
+    item: QueueItem,
+    status: 'done' | 'failed' | 'new',
+    patch: { filename?: string | null; bytes?: number | null; error?: string | null; attempts?: number },
+  ): Promise<void> {
+    if (item.kind !== 'link' || !item.url || !this.deps.links) return;
+    try {
+      await this.deps.links.mark(item.postId, status, {
+        ...(patch.filename !== undefined ? { filename: patch.filename } : {}),
+        ...(patch.bytes !== undefined ? { bytes: patch.bytes } : {}),
+        error: patch.error ?? null,
+        ...(patch.attempts !== undefined ? { attempts: patch.attempts } : {}),
+      });
+      // A task owns a set of links; when the last of them stops waiting, the
+      // task's newest run is closed so "how did that pass go?" is answerable.
+      if (this.deps.tasks) {
+        const links = await this.deps.links.list();
+        await this.deps.tasks.noteLinkSettled(item.postId, links);
+      }
+    } catch {
+      /* non-fatal: the file (or the failure) is already real either way */
+    }
+  }
+
+  /**
+   * Download one collected mirror link.
+   *
+   * No server, no adapter and no rating: the URL is off-site by construction
+   * (that is why it was collected), so the browser's downloader owns it. Hosts
+   * that answer with an HTML interstitial (Drive folders, Mega landing pages)
+   * fail honestly - the row keeps the message and the exported `.txt` stays the
+   * reliable path for a dedicated download manager.
+   */
+  private async processLinkItem(item: QueueItem, settings: ExtensionSettings): Promise<{ filename: string; bytes: number | null }> {
+    const url = item.url ?? '';
+    if (!isValidHttpUrl(url)) {
+      throw new BooruError(`"${url}" is not a downloadable http(s) URL`, {
+        kind: 'parse-failure',
+        hint: 'Remove the row, or fix the link in the exported .txt and import it again.',
+      });
+    }
+    const stored = (await this.deps.links?.byId(item.postId)) ?? null;
+    const server = item.serverId ? await this.deps.servers.get(item.serverId) : null;
+    const path = buildMirrorPath({
+      url,
+      provider: stored?.provider ?? null,
+      siteType: server?.siteType ?? stored?.siteType ?? null,
+      filename: stored?.filename ?? null,
+      settings: { mirrorFolderTemplate: settings.mirrorFolderTemplate },
+      now: new Date(this.now()),
+    });
+    const outcome = await this.deps.downloader.download({
+      url,
+      filename: path.fullPath,
+      conflictAction: settings.duplicateBehaviour === 'overwrite' ? 'overwrite' : 'uniquify',
+    });
+    return { filename: path.fullPath, bytes: outcome.bytes };
+  }
+
   private async processItem(item: QueueItem, settings: ExtensionSettings): Promise<{ filename: string; bytes: number | null }> {
+    if (item.kind === 'link') return this.processLinkItem(item, settings);
     // A deleted profile means the work cannot ever succeed: mark it skipped so
     // it does not keep retrying.
     const known = await this.deps.servers.get(item.serverId);
