@@ -1,0 +1,205 @@
+# Manual test plan
+
+The automated suite (223 tests) covers the adapters, the shared services and the
+message protocol. This document covers what only a human can check: the real
+extension in a real browser, the UI states, and the failure messages a user sees.
+
+Legend: **[V]** = can also be exercised in the offline preview harness
+(`npm run preview`) without touching a live site.
+
+---
+
+## 0. Setup
+
+1. `npm run verify` — type checks, build and tests must all pass.
+2. `chrome://extensions` → *Developer mode* → **Load unpacked** → pick `dist/`.
+3. Click the toolbar icon → **Manager** (or right-click the icon → *Options*).
+   The options page opens on the **Servers** tab.
+4. Optional: `npm run preview` → open <http://localhost:4173> for the harness
+   (real UI in iframes, mock booru APIs, demo credentials on the page).
+
+Test profiles you may want, in the order that makes later tests easy:
+
+| Profile | site type | credentials |
+| --- | --- | --- |
+| `e621 main` | e621 | your username + API key, descriptive UA |
+| `Danbooru main` | danbooru | your username + API key |
+| `Gelbooru main` | gelbooru | API key + numeric user id |
+| `e926 read-only` | e621 (base URL `https://e926.net`) | none |
+
+---
+
+## 1. Preview harness [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 1.1 | `npm run preview`, open the harness page | Options + popup iframes render; the harness documents demo credentials and `force:*` directives |
+| 1.2 | In the options frame, go to **Browse**, search `cat` | 24-post mock dataset, tiles show previews and rating chips |
+| 1.3 | Add a server in the options frame, then reload the page | The new server is still there (shared `localStorage` namespace) |
+| 1.4 | Add a server in the options frame, open the popup frame | The same server list appears in the popup (shared state) |
+| 1.5 | Press **Reset preview data** on the harness page | Page reloads; the four demo servers are back and no user changes remain |
+| 1.6 | Search with tag `force:429` | Red error chip: *Rate limited* + a hint about lowering the request interval |
+| 1.7 | Search with tag `force:401` | *Authentication failed* (not an endpoint message) |
+| 1.8 | Search with tag `force:html` | *Endpoint mismatch* — explains the base URL points at a web page |
+| 1.9 | Validate the seeded e621 profile | Success message naming `demo_e621`; the timestamp updates |
+
+---
+
+## 2. Server list [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 2.1 | First run, no profiles | Empty state: *Add server* plus per-site “Add e621 / Add Danbooru / Add Gelbooru” shortcuts |
+| 2.2 | Add profile 1 | It becomes the default automatically (`DEFAULT` chip) |
+| 2.3 | Add profile 2 | Profile 1 stays the only default; the list shows site type, base URL, rating filter state, login state |
+| 2.4 | Press **Set default** on profile 2 | Exactly one default chip; order stays stable |
+| 2.5 | Press **Test** on a valid profile | Button shows a busy state, then the row’s status chip becomes green (*Endpoint and credentials OK — signed in as …*) with the current time |
+| 2.6 | Press **Test** on a profile with a deliberately wrong key | Red chip *Authentication failed* and the reason is inside the row tooltip/message; no key text anywhere |
+| 2.7 | Press **Duplicate** on a profile | A copy appears: label suffixed *copy*, not default, validation reset to unknown, credentials present (`hasApiKey`), no full key visible |
+| 2.8 | Press **Delete** on the current default | Row disappears, the next profile is promoted to default automatically |
+| 2.9 | Press **Delete** on the last profile | Empty state returns, no errors in the console |
+
+---
+
+## 3. Add / edit form and validation matrix [V]
+
+Open *Servers → Add server* and confirm:
+
+- **Fields**: site type selector, label, base URL, rating-filter toggle + allow-list,
+  username, API key, user id, custom User-Agent, plus the site’s helper texts.
+  The field set is generated from the adapter (`credentialFields()`), so e621 shows
+  a User-Agent hint, Gelbooru shows *user id (numeric)*, Danbooru shows neither.
+- **Base URL** is pre-filled with the site default and can be edited (fork/instance).
+- **Use suggested** fills a descriptive User-Agent (never a browser-looking string).
+
+Then run the validation matrix. Expected *reason* text, not just red/green:
+
+| # | Scenario | Expected result |
+| --- | --- | --- |
+| 3.1 | Correct credentials, correct base URL | Success; account name is displayed (e621/Danbooru) or the profile is marked read/write (Gelbooru) |
+| 3.2 | Wildly wrong API key | **Authentication failed** — “rejected the credentials (HTTP 401)”, hint mentions re-copying the key |
+| 3.3 | Correct key, wrong **username** (e621/Danbooru) | **Authentication failed** (401) |
+| 3.4 | Base URL pointing at the site *web page* (e.g. `https://e621.net/posts`) | **Endpoint mismatch** — HTML/404 message, hint about the base URL |
+| 3.5 | Base URL of an unrelated host that answers with HTML | **Endpoint mismatch**, never “authentication failed” |
+| 3.6 | Base URL of a host that does not resolve / offline | **Network failure** — DNS/offline wording |
+| 3.7 | Gelbooru profile with user id but no API key | **Incomplete configuration** — the pair is required together |
+| 3.8 | Site that returns 429/503 (e.g. validate e621 repeatedly, or `force:429` in the harness) | **Rate limited** — distinct message and hint, not auth/endpoint |
+| 3.9 | Credentials left blank entirely | Validation succeeds as a **read-only** profile with a warning |
+| 3.10 | e621 profile with a `Mozilla/5.0 … Chrome/…` User-Agent | Success plus a warning that a browser-like UA violates the site policy |
+| 3.11 | Plain `http://` base URL | Success plus a plain-HTTP warning |
+| 3.12 | Cancel while validation is running | UI returns to idle; no unhandled rejection in the console |
+
+Form behaviour:
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 3.13 | Edit an existing profile | Fields are pre-filled; the API key shows the masked placeholder, leaving it untouched keeps the stored key |
+| 3.14 | Save with a failed validation | Warns and offers **Save anyway**; the failure reason is stored on the profile |
+| 3.15 | Change the base URL or credentials and save | Validation state resets to unknown (old success must not be trusted) |
+| 3.16 | Reload the options page | The last validation result, message and timestamp are still shown |
+
+---
+
+## 4. Browse [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 4.1 | *Browse* → choose a server, search a common tag | Grid of posts with previews, ratings, dimensions, post links |
+| 4.2 | Search `-rating:explicit` on a site whose filter allows explicit | Results contain no explicit posts |
+| 4.3 | Toggle the rating filter off in the browse toolbar | The filter is preserved per server config and the applied tags are shown |
+| 4.4 | Press **Load more** | Next page appends (e621 uses page tokens; Danbooru/Gelbooru use `page`/`pid`) |
+| 4.5 | Search nonsense tags | Empty state, no error |
+| 4.6 | Search `force:html` (preview) | Red *Endpoint mismatch* error, retry possible |
+| 4.7 | Select two posts → **Queue selected (2)** | Toast/confirmation and the queue tab shows the two items |
+| 4.8 | Press **Download** on one post | File is saved, the post card shows the saved filename |
+
+## 5. Queue [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 5.1 | Queue 5 posts → **Start** | Items progress pending → running → done; summary counters update; the button shows *Running…* |
+| 5.2 | Press **Pause** mid-run | No new items start; running items finish |
+| 5.3 | **Resume** | Work continues |
+| 5.4 | Cancel a pending item | Status becomes *canceled*, counters update |
+| 5.5 | Queue the same post twice (via browse + popup) | Second attempt is ignored as a duplicate (pending/running de-duplication) |
+| 5.6 | Queue an explicit post on a safe-only profile | It is reported as skipped by the rating filter, not downloaded |
+| 5.7 | Break a profile’s key, then run its queue | Items fail with the *Authentication failed* kind; error text contains no credentials |
+| 5.8 | **Retry failed** | Failed items return to pending and re-run |
+| 5.9 | **Clear done** / **Clear all** | Only the matching rows disappear |
+| 5.10 | Close the options page during a run, reopen the queue | Progress is intact (persisted state), running items resume from pending after a browser restart |
+| 5.11 | Queue a post on a server whose profile was deleted meanwhile | Skip with *Unsupported site type* reason instead of an infinite retry loop |
+
+## 6. Downloads and naming [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 6.1 | Default templates | Files land in `Downloads/booru/<siteType>/<id>_<md5>.<ext>` |
+| 6.2 | Set folder `booru/{siteLabel}/{rating}`, filename `{artist}-{id}` | Paths match, illegal characters replaced, unknown tokens collapse quietly |
+| 6.3 | Template producing a very long filename (`{tag1}_{tag2}_…`) | Filename is capped (~180 chars) and a warning explains the shortening |
+| 6.4 | Template with `../` or `..\` | Traversal is neutralised; the file still lands inside the download folder |
+| 6.5 | Download the same post twice | The second file is uniquified (`… (1).jpg`), nothing is overwritten |
+| 6.6 | Post with a video extension | `{isVideo}` renders `video`; the file downloads normally |
+
+## 7. Settings [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 7.1 | Change templates/concurrency | **Save settings** persists; reopening the page keeps them |
+| 7.2 | **Reset to defaults** | Defaults restored |
+| 7.3 | Turn off *Enforce rating filter on download* | A single post download of an excluded rating now succeeds |
+| 7.4 | Turn off *User-Agent rewriting* then press **Re-sync User-Agent rules** | Report shows 0 rules applied; e621 requests fall back to `_client` |
+| 7.5 | **Export servers (no keys)** | JSON download contains no credential values (open the file and search for the key) |
+| 7.6 | **Export with keys** | Explicit confirmation first; the file then contains the keys — handle with care |
+| 7.7 | **Import servers** with an exported file | Profiles appear, exactly one default, duplicates handled gracefully |
+| 7.8 | Import the same file twice | No duplicated profiles (or a clear skipped count) |
+| 7.9 | **Delete all stored keys** | Every profile reports `hasApiKey = false`; validation switches to read-only |
+| 7.10 | Theme switch | Light/dark/system applies immediately |
+
+## 8. Diagnostics [V]
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 8.1 | Open *Diagnostics* | Version, environment, storage keys, adapter catalog (site, auth style, limits, docs link) and saved servers |
+| 8.2 | Validate a profile, then open Diagnostics | This profile’s probe trace is listed: probe label, redacted URL, status, duration, interpretation |
+| 8.3 | **Copy diagnostics** | Clipboard contains a report; paste it and search for the API key **and** its last 4 characters → no matches |
+| 8.4 | Check the browser console for every flow above | No credential values, no unhandled errors |
+| 8.5 | Custom/fork host without host permission | Diagnostics shows the granted/permission-needed state, with a **Grant access** action |
+
+## 9. Popup and page flow (real browser)
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 9.1 | Open a supported **post** page (e621/Danbooru/Gelbooru) in the active tab | Popup shows *This page* with the detected site, matching server (or an “add this site” prompt), and the post card |
+| 9.2 | Press **Download** | File saved with the configured naming; the popup reports the filename |
+| 9.3 | Press **Queue** | Item appears in the queue footer; *Start* runs it |
+| 9.4 | Open a **tag/search** page instead | Popup offers *Search these tags* against the matching server |
+| 9.5 | Open an unrelated page | Popup reports that the page is not a supported booru page, and offers the manager |
+| 9.6 | No servers configured at all | Popup shows the empty state with **Open server manager** |
+
+## 10. Content-script button
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 10.1 | Enable *Show the on-page download button* (Settings), open a post page | Floating “⬇ Download with Booru Manager” button appears (shadow DOM, page styles unaffected) |
+| 10.2 | Press it | Button text → *Downloading…* → success message with the filename |
+| 10.3 | Press it twice | Second press re-downloads (uniquified file) and reports accordingly |
+| 10.4 | Disable the setting and reload the page | Button no longer appears |
+| 10.5 | Open a post page from a host with no saved profile | Button reports that no server matches the page (link to the manager) |
+
+## 11. Regression checklist for a new site adapter
+
+1. Add the adapter file + registration line, then `npm test` — the conformance
+   suite must pass without touching shared code.
+2. New site type appears in *Add server* automatically (no UI change was made).
+3. Add a profile, validate it, browse it, download one post, queue three.
+4. Confirm the failure matrix in section 3 holds for the new site (wrong key,
+   wrong base URL, offline, throttling).
+5. Update the README table and `docs/ARCHITECTURE.md` notes.
+
+## 12. Cleanup
+
+- Delete test profiles (or **Delete all stored keys**), then check
+  `chrome://extensions` → *Details → Site access* to revoke any host permissions
+  you granted for custom instances.
+- Preview harness: press **Reset preview data** (or clear `bsm-preview:*` keys in
+  DevTools → Application → Local Storage).

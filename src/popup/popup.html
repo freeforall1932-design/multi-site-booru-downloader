@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Booru Server Manager</title>
+    <link rel="stylesheet" href="../static/base.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="popup">
+    <header class="popup-header">
+      <div class="popup-title">
+        <span class="popup-logo">B</span>
+        <strong>Booru Manager</strong>
+      </div>
+      <div class="popup-header-actions">
+        <button type="button" id="open-options" class="btn btn-subtle" title="Open the full server manager">Servers</button>
+      </div>
+    </header>
+    <div id="popup-view"></div>
+    <div id="toast-anchor"></div>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Booru Server Manager</title>
+    <link rel="stylesheet" href="../static/base.css" />
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <div class="app">
+      <nav class="rail" id="nav" aria-label="Main navigation">
+        <div class="rail-brand">
+          <div class="rail-logo">B</div>
+          <div>
+            <div class="rail-title">Booru Server Manager</div>
+            <div class="rail-subtitle">multi-server downloader</div>
+          </div>
+        </div>
+      </nav>
+      <main class="content">
+        <div class="preview-banner" id="preview-banner" hidden>
+          Preview mode: the same UI code running against mock booru endpoints, localStorage storage and mock downloads. No
+          real credentials or network calls are involved.
+        </div>
+        <div id="view"></div>
+      </main>
+    </div>
+    <div id="toast-anchor"></div>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

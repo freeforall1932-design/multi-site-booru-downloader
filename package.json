@@ -1,0 +1,26 @@
+{
+  "name": "booru-server-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "One browser extension, many saved booru servers: server manager + unified downloader for e621, Danbooru and Gelbooru family sites.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "node scripts/smoke-dist.mjs",
+    "verify": "npm run typecheck && npm run build && npm test && npm run smoke",
+    "icons": "node scripts/make-icons.mjs",
+    "preview": "node scripts/build.mjs && node scripts/preview-server.mjs"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.287",
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
