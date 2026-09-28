@@ -131,3 +131,24 @@ diagnostics payload, treat it as a security bug: fix it at the source (redaction
 helpers in `src/shared/util.ts` and the response shaping in `src/core/router.ts`)
 and add a regression test alongside the existing masking tests in
 `tests/core/router.test.ts` and `tests/core/http.test.ts`.
+
+## Side panel
+
+The panel is a full UI surface but no new trust: it is an extension page with the
+same origin as the options page, so it uses the same message-only channel to the
+worker as every other surface.
+
+- It contains no credentials - server rows arrive already masked (`apiKeyMask`,
+  `hasApiKey`) and export/import flows to the options page, which owns the reveal
+  and export controls.
+- It performs no network I/O: fetches go through `browse/search` (which applies the
+  rating allow-list and the tag blacklist in the router) and downloads through the
+  queue.
+- The download notebook (`bsm.history`) stores labels, ids, filenames, byte counts
+  and timestamps - never URLs with credentials, never API keys. `Reset download
+  history` removes it without touching files on disk.
+- `chrome.sidePanel.open` is only callable from a user gesture; the panel falls
+  back to opening the options page when the API refuses, so a mis-configured
+  profile can never dead-end the user.
+- Post thumbnails are drawn from the sites' own preview URLs (no third-party
+  host); *Settings → Interface → Post thumbnails* switches them off.

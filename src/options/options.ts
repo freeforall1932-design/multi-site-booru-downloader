@@ -62,6 +62,8 @@ interface AppState {
   hostAccess: { origin: string; granted: boolean } | null;
   settingsDraft: ExtensionSettings | null;
   settingsSaving: boolean;
+  historyCount: number;
+  searchCount: number;
 }
 
 const platform = getPlatform();
@@ -93,6 +95,8 @@ const state: AppState = {
   hostAccess: null,
   settingsDraft: null,
   settingsSaving: false,
+  historyCount: 0,
+  searchCount: 0,
 };
 
 function emptySummary(): QueueSummary {
@@ -144,6 +148,25 @@ function renderNav(): void {
     { view: 'settings', label: 'Settings', iconName: 'settings' },
     { view: 'diagnostics', label: 'Diagnostics', iconName: 'info' },
   ];
+  // One extra row: everything the options page does is also available in the
+  // docked panel, which is what the toolbar opens by default.
+  nav.appendChild(
+    h(
+      'button',
+      {
+        class: 'nav-item nav-item-panel',
+        type: 'button',
+        title: 'Open the docked side panel (Settings → "Toolbar click opens")',
+        onClick: () => {
+          void platform.openPanel().then((opened) => {
+            if (!opened) toast('The browser did not open a side panel; switching the toolbar to popup mode is the fallback.', 'warning', 6000);
+          });
+        },
+      },
+      h('span', { class: 'nav-label', text: 'Open side panel' }),
+    ),
+  );
+
   for (const item of items) {
     const active = state.view === item.view || (state.view === 'editor' && item.view === 'servers');
     nav.appendChild(
@@ -540,10 +563,15 @@ function renderQueueView(): void {
 
 function renderSettingsView(): void {
   if (!state.settings) return;
+  void refreshHistoryCounts();
   const settingsState: SettingsState = {
     settings: state.settingsDraft ?? state.settings,
     saving: state.settingsSaving,
     hostAccess: state.hostAccess,
+    servers: state.servers,
+    adapters: state.adapters,
+    historyCount: state.historyCount,
+    searchCount: state.searchCount,
   };
   renderSettings(root, settingsState, {
     onChange: (patch) => {
@@ -617,6 +645,20 @@ function renderSettingsView(): void {
       const result = await send<{ ok: boolean; applied: number; error?: string }>({ type: 'userAgent/sync' });
       if (result) toast(result.ok ? `User-Agent rules synced (${result.applied})` : `Sync failed: ${result.error ?? 'unknown'}`, result.ok ? 'success' : 'error');
     },
+    onClearHistory: async () => {
+      if (!globalThis.confirm('Forget every remembered download? Posts list again afterwards; files on disk are untouched.')) return;
+      const result = await send<{ removed: number }>({ type: 'history/clear' });
+      state.historyCount = 0;
+      toast(`Download history reset (${result?.removed ?? 0} entries)`, 'success');
+      renderSettingsView();
+    },
+    onClearSearches: async () => {
+      const result = await send<{ removed: number }>({ type: 'searches/clear' });
+      state.searchCount = 0;
+      toast(`Search history cleared (${result?.removed ?? 0} entries)`, 'success');
+      renderSettingsView();
+    },
+    onOpenServers: () => navigate('servers'),
   });
 }
 
@@ -698,6 +740,21 @@ async function refreshQueue(): Promise<void> {
     renderNav();
     if (state.view === 'queue') renderQueueView();
   }
+}
+
+async function refreshHistoryCounts(): Promise<boolean> {
+  const [history, searches] = await Promise.all([
+    send<{ total: number }>({ type: 'history/list' }),
+    send<{ entries: unknown[] }>({ type: 'searches/list' }),
+  ]);
+  const before = `${state.historyCount}:${state.searchCount}`;
+  state.historyCount = history?.total ?? 0;
+  state.searchCount = searches?.entries.length ?? 0;
+  const changed = before !== `${state.historyCount}:${state.searchCount}`;
+  // One extra render so the counters are accurate; the second pass finds the
+  // numbers unchanged and stops, so this cannot loop.
+  if (changed && state.view === 'settings') renderSettingsView();
+  return changed;
 }
 
 async function refreshDiagnostics(): Promise<void> {

@@ -37,6 +37,7 @@ const facade: Platform = {
   syncUserAgentRules: (servers: ServerConfig[], settings: ExtensionSettings) => resolve().syncUserAgentRules(servers, settings),
   activeTabUrl: (): Promise<string | null> => resolve().activeTabUrl(),
   openOptions: (hash?: string): void => resolve().openOptions(hash),
+  openPanel: (): Promise<boolean> => resolve().openPanel(),
   describeEnvironment: (): Promise<Record<string, string>> => resolve().describeEnvironment(),
 };
 
@@ -61,6 +62,10 @@ class HeadlessPlatform implements Platform {
 
   openOptions(): void {
     /* no-op */
+  }
+
+  async openPanel(): Promise<boolean> {
+    return false;
   }
 
   async describeEnvironment(): Promise<Record<string, string>> {

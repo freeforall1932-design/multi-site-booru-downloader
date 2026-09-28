@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Booru Server Manager — download panel</title>
+    <!-- base.css carries the shared components (buttons, chips, fields, tables)
+         used by the reused server/diagnostics views; panel.css re-skins them for
+         the docked side panel and adds the panel's own components. -->
+    <link rel="stylesheet" href="../static/base.css" />
+    <link rel="stylesheet" href="panel.css" />
+  </head>
+  <body class="panel-body">
+    <header class="app-header">
+      <div class="app-header-text">
+        <p class="eyebrow" id="panel-eyebrow">BOORU SERVER MANAGER</p>
+        <h1 id="panel-title">Download panel</h1>
+      </div>
+      <span id="engine-status" class="status-pill idle">Loading…</span>
+    </header>
+
+    <nav class="popupTabs" id="panel-tabs" aria-label="Panel sections"></nav>
+
+    <main id="panel">
+      <div class="psBanner" id="preview-banner" hidden>
+        Preview mode — the real panel running against mock boorus, local storage and mock downloads.
+      </div>
+
+      <!-- Browse: active-tab context, the fetch card, then the list of rows. -->
+      <section id="pane-browse" class="pane" aria-label="Browse and download">
+        <div id="context-host"></div>
+        <div id="listing-host"></div>
+        <div id="browse-list-host"></div>
+      </section>
+
+      <!-- Queue: the same rows with progress and maintenance controls. -->
+      <section id="pane-queue" class="pane" aria-label="Download queue" hidden>
+        <div id="queue-host"></div>
+      </section>
+
+      <!-- Servers: list, editor and diagnostics (reused views). -->
+      <section id="pane-servers" class="pane" aria-label="Servers" hidden>
+        <div id="servers-host"></div>
+      </section>
+
+      <!-- Settings: the sectioned settings screen. -->
+      <section id="pane-settings" class="pane" aria-label="Settings" hidden>
+        <div id="settings-host"></div>
+      </section>
+
+      <div id="diagnostics-host" hidden></div>
+    </main>
+
+    <footer class="download-dock" id="dock">
+      <div id="dock-host"></div>
+    </footer>
+
+    <div id="toast-anchor"></div>
+    <script type="module" src="panel.js"></script>
+  </body>
+</html>

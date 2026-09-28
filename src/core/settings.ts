@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type ExtensionSettings } from '../shared/types.js';
+import { DEFAULT_SETTINGS, type ExtensionSettings, type PanelTab } from '../shared/types.js';
 import { clamp, toInt } from '../shared/util.js';
 import { STORAGE_KEYS, type StorageArea } from './storage.js';
 
@@ -15,7 +15,7 @@ export function normalizeSettings(raw: unknown): ExtensionSettings {
     filenameTemplate: sanitizeTemplate(input.filenameTemplate, DEFAULT_SETTINGS.filenameTemplate),
     maxConcurrency: clamp(toInt(input.maxConcurrency, DEFAULT_SETTINGS.maxConcurrency), 1, 8),
     minRequestIntervalMs: clamp(toInt(input.minRequestIntervalMs, DEFAULT_SETTINGS.minRequestIntervalMs), 0, 30_000),
-    globalTagSuffix: typeof input.globalTagSuffix === 'string' ? input.globalTagSuffix.trim().slice(0, 300) : '',
+    globalTagSuffix: sanitizeTagList(input.globalTagSuffix, 300),
     maxTagsInFilename: clamp(toInt(input.maxTagsInFilename, DEFAULT_SETTINGS.maxTagsInFilename), 1, 30),
     tagSeparator: typeof input.tagSeparator === 'string' ? input.tagSeparator.slice(0, 3) : DEFAULT_SETTINGS.tagSeparator,
     enableContentScriptButton: input.enableContentScriptButton ?? DEFAULT_SETTINGS.enableContentScriptButton,
@@ -24,7 +24,40 @@ export function normalizeSettings(raw: unknown): ExtensionSettings {
     enforceRatingFilterOnDownload: input.enforceRatingFilterOnDownload ?? DEFAULT_SETTINGS.enforceRatingFilterOnDownload,
     maxRetries: clamp(toInt(input.maxRetries, DEFAULT_SETTINGS.maxRetries), 1, 8),
     theme,
+
+    uiMode: input.uiMode === 'popup' ? 'popup' : 'sidepanel',
+    panelDefaultTab: isPanelTab(input.panelDefaultTab) ? input.panelDefaultTab : DEFAULT_SETTINGS.panelDefaultTab,
+    mediaFilter: input.mediaFilter === 'video' || input.mediaFilter === 'image' ? input.mediaFilter : 'all',
+    skipDownloaded: input.skipDownloaded ?? DEFAULT_SETTINGS.skipDownloaded,
+    pageRangeLimit: clamp(toInt(input.pageRangeLimit, DEFAULT_SETTINGS.pageRangeLimit), 1, 500),
+    queueRowLimit: clamp(toInt(input.queueRowLimit, DEFAULT_SETTINGS.queueRowLimit), 10, 500),
+    showThumbnails: input.showThumbnails ?? DEFAULT_SETTINGS.showThumbnails,
+    autoStartQueue: input.autoStartQueue ?? DEFAULT_SETTINGS.autoStartQueue,
+    duplicateBehaviour: input.duplicateBehaviour === 'overwrite' ? 'overwrite' : 'uniquify',
+    filePreference: input.filePreference === 'sample' ? 'sample' : 'original',
+    tagBlacklist: sanitizeTagList(input.tagBlacklist, 500),
+    searchHistoryEnabled: input.searchHistoryEnabled ?? DEFAULT_SETTINGS.searchHistoryEnabled,
+    searchHistoryLimit: clamp(toInt(input.searchHistoryLimit, DEFAULT_SETTINGS.searchHistoryLimit), 0, 50),
   };
+}
+
+function isPanelTab(value: unknown): value is PanelTab {
+  return value === 'browse' || value === 'queue' || value === 'servers' || value === 'settings';
+}
+
+/**
+ * Tag-ish free text (blacklist, global suffix): collapse whitespace, drop the
+ * minus sign the user may have typed (`-gore` and `gore` are the same rule) and
+ * cap the length. Multi-line input is accepted for readability.
+ */
+function sanitizeTagList(value: unknown, maxLength: number): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .split(/[\s,]+/)
+    .map((token) => token.trim().replace(/^-+/, ''))
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, maxLength);
 }
 
 function sanitizeTemplate(value: unknown, fallback: string): string {

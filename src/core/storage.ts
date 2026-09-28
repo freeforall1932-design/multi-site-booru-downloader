@@ -19,6 +19,10 @@ export const STORAGE_KEYS = {
   settings: 'bsm.settings',
   queue: 'bsm.queue',
   meta: 'bsm.meta',
+  /** Successful downloads, so listings can skip what is already saved. */
+  history: 'bsm.history',
+  /** Remembered searches per server (side-panel search box). */
+  searches: 'bsm.searches',
 } as const;
 
 /** Bump when a migration is needed; `migrateStorage` is the single place to react. */

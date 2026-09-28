@@ -210,8 +210,24 @@ export function ratingExclusions(
 }
 
 /** Merge search tags with adapter-provided rating filters. */
+/**
+ * Join the user's tags, the adapter's own filter tokens and the global suffix.
+ *
+ * Tokens are de-duplicated case-insensitively: typing a tag that the global
+ * suffix also adds (or that the rating filter already spells out) must not send
+ * it twice - sites parse `solo solo` fine, but it makes `appliedTags` confusing
+ * in the UI and wastes query length.
+ */
 export function composeTags(baseTags: string | undefined, extra: string[], globalSuffix: string): string {
-  return [...splitTags(baseTags), ...extra, ...splitTags(globalSuffix)].join(' ').trim();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const token of [...splitTags(baseTags), ...extra, ...splitTags(globalSuffix)]) {
+    const key = token.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(token);
+  }
+  return out.join(' ').trim();
 }
 
 /** Normalize account info extracted from a profile-ish endpoint. */

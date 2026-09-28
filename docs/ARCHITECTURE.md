@@ -7,6 +7,7 @@ shared booru services through one message protocol.
 
 ```
 ┌──────────────────────────── UI surfaces ────────────────────────────┐
+│ side panel: Browse · Queue · Servers · Settings  (toolbar target)    │
 │ options page (#servers #editor #browse #queue #settings #diagnostics)│
 │ toolbar popup          ·  content script button (post pages)         │
 └───────────────────────────────┬─────────────────────────────────────┘
@@ -21,6 +22,11 @@ shared booru services through one message protocol.
 │store │ │ store   │ │(resolve │ │(download│ │ service  │ │downloads │
 │      │ │         │ │ posts)  │ │ + rate) │ │          │ │          │
 └──┬───┘ └────┬────┘ └────┬────┘ └────┬────┘ └────┬─────┘ └───┬──────┘
+   │          │           │           │           │           │
+┌──▼──────────▼───────────▼───────────▼───────────▼───────────▼───────┐
+│ history: download notebook (skip downloaded) · search notebook       │
+│ pages: page-range parser  ·  template: naming-token editor           │
+└──────────────────────────────────────────────────────────────────────┘
    │          │           │           │           │           │
 ┌──▼──────────▼───────────▼───────────▼───────────▼───────────▼───────┐
 │  shared: http client (rate limiter, retries, redaction), errors,     │
@@ -56,7 +62,11 @@ its event stream is redacted before it is emitted.
 | `registry` + `adapters/index.ts` | `registerBuiltinAdapters()` is the single registration point |
 | `storage.ts` | `StorageArea` interface + Chrome/Memory/Web implementations + `STORAGE_KEYS`, schema version, `migrateStorage` |
 | `servers.ts` | `ServerStore`: CRUD, default handling, duplicate (secrets copied, validation reset), credential clearing, masking (`toServerView`), JSON export/import, validation bookkeeping |
-| `settings.ts` | `SettingsStore`: defaults, partial saves, reset, migration-safe merge |
+| `settings.ts` | `SettingsStore`: defaults, partial saves, reset, migration-safe merge (including the side-panel keys: `uiMode`, `panelDefaultTab`, `mediaFilter`, `skipDownloaded`, `pageRangeLimit`, `queueRowLimit`, `showThumbnails`, `autoStartQueue`, `duplicateBehaviour`, `filePreference`, `tagBlacklist`, `searchHistory*`) |
+| `history.ts` | `DownloadHistoryStore` + `SearchHistoryStore`: the panel's two notebooks (`bsm.history`, `bsm.searches`) |
+| `search.ts` | `composeSearchTags`: tag blacklist + global suffix applied to every query |
+| `pages.ts` | `parsePageRange` / `fromToRange` / `batchRange`: the listing card's page grammar (`2,4,6-10`, `50-`, `all`) with the configured cap |
+| `template.ts` | Filename-template token catalog, canonical-template detection, preview rendering |
 | `validation.ts` | `ValidationService`: runs an adapter's ordered probes, classifies results, produces a `ValidationResult` with a redacted trace |
 | `client.ts` | `BooruClient`: server/adapter resolution, search, post lookup, URL → post resolution, rating-filter decisions |
 | `queue.ts` | `DownloadQueue`: persistence, de-duplication, concurrency, pause/resume/retry/cancel/clear, per-item failure recording |
@@ -95,14 +105,29 @@ description for the diagnostics tab.
 The UI captures `getPlatform()` at module scope; the façade delegates per call, so
 the preview can install its platform *after* the UI modules were evaluated.
 
-### 5. UI, popup, content script
+### 5. UI, side panel, popup, content script
 
-`src/ui/` contains pure view builders (`server-list`, `server-form`, `browse`,
-`queue-view`, `settings-view`, `diagnostics-view`) plus `dom.ts` (element helper,
-no `innerHTML` for dynamic content), `format.ts` and `toast.ts`. The options shell
-owns application state and hash routing; the popup reuses the same views for its
-compact layout; the content script is a shadow-DOM button that sends one
-`posts/download` request.
+`src/ui/` contains pure view builders. The options page owns application state and
+hash routing; the popup reuses the same views for its compact layout; the content
+script is a shadow-DOM button that sends one `posts/download` request.
+
+| Module | Used by | Responsibility |
+| --- | --- | --- |
+| `dom.ts` | everything | element helper (`h`, `button`, `field`, `icon`, `clear`), never `innerHTML` for dynamic content |
+| `format.ts`, `toast.ts` | everything | chips/dots/relative times, and toasts |
+| `server-list.ts`, `server-form.ts` | options, panel | server manager + add/edit form (driven by the adapter's credential fields) |
+| `browse.ts`, `queue-view.ts` | options, popup | wide-layout grid and table views |
+| `settings-sections.ts` | options, panel | **the** settings screen: sectioned, one hint per option, shared markup |
+| `settings-view.ts` | options | thin adapter over `settings-sections.ts` |
+| `diagnostics-view.ts` | options, panel | adapter catalog, environment, credential-free validation traces |
+| `panel-context.ts` | panel | "which page am I on?" card + the single-post card |
+| `panel-listing.ts` | panel | fetch card: search box, page range, media filter, crawl progress |
+| `panel-queue.ts` | panel | the row list (summary, toolbars, rows) and the fixed dock |
+| `panel/panel.ts` | panel | the controller: state, message calls, polling, tab routing |
+
+The panel is documented in [SIDEPANEL.md](SIDEPANEL.md). It renders masked views
+only and drives every action through the same `UiRequest`s the options page uses,
+so a panel-only feature cannot bypass validation, rating filters or rate limits.
 
 ## Message protocol
 
@@ -112,11 +137,13 @@ is always `{ ok: true, data }` or `{ ok: false, error: { message, kind, hint } }
 ```
 servers/  list · save · remove · duplicate · setDefault · validate · validateDraft
           clearCredentials · export · import
-browse/   search
+browse/   search                      (adds the tag blacklist before the adapter sees it)
 posts/    get · resolveUrl · download
 routes/   detect
 queue/    list · enqueue · enqueuePosts · run · pause · resume · retryFailed
-          clear · cancel
+          clear · cancel · remove        (run accepts { itemIds } - "Download selected")
+history/  list · remove · clear        (the download notebook)
+searches/ list · add · remove · clear  (recent queries per server)
 settings/ get · save · reset
 diagnostics/info · userAgent/sync
 ```
@@ -126,8 +153,12 @@ Rules enforced by the router:
 - No response containing a secret: servers cross the boundary as
   `ServerConfigView` (`apiKeyMask` + `hasApiKey` only).
 - `queue/run` and `queue/resume` are fire-and-forget; the UI polls
-  `queue/list` (1.5 s in the options page) so a long download never blocks a
-  message channel.
+  `queue/list` (1.5 s in the options page, 1.2 s in the side panel) so a long
+  download never blocks a message channel. `queue/run` takes an optional
+  `itemIds` list, which is how the panel downloads only the ticked rows.
+- Search history writes are **dropped, not rejected**, when
+  `searchHistoryEnabled` is off, so a panel action can never fail because of a
+  preference.
 - Failures are converted into the shared taxonomy (`FailureKind`) plus a
   next-step `hint`, so the UI can separate *authentication failure* from
   *endpoint mismatch* from *rate limiting* from *network failure*.
@@ -191,7 +222,9 @@ queue/run → worker loop (maxConcurrency)
 | --- | --- |
 | `bsm.servers` | `ServerConfig[]` — credentials + validation state + rating allow-list |
 | `bsm.settings` | `ExtensionSettings` — templates, concurrency, intervals, toggles |
-| `bsm.queue` | `{ items: QueueItem[], paused: boolean }` |
+| `bsm.queue` | `{ items: QueueItem[], paused: boolean }` — the panel's row list *is* this list |
+| `bsm.history` | `DownloadHistoryEntry[]` (newest first, capped at 5000) — powers "skip downloaded" |
+| `bsm.searches` | `SearchHistoryEntry[]` — recent queries per server (capped by the setting) |
 | `bsm.meta` | `{ schemaVersion, firstRunAt }` |
 
 `migrateStorage()` runs on install/update and is the single place to react to a
@@ -202,9 +235,10 @@ start, so a browser restart never loses work or leaves stuck rows.
 
 MV3 workers are killed aggressively, so the worker owns no durable state:
 
-- on `onInstalled`: `migrateStorage()` + User-Agent rule sync;
-- on `storage.onChanged` for servers/settings: caches invalidated,
-  User-Agent rules re-synced;
+- on `onInstalled` / `onStartup`: `migrateStorage()`, `applyUiMode()`
+  (toolbar → side panel or popup, from `settings.uiMode`) + User-Agent rule sync;
+- on `storage.onChanged` for servers/settings/history/searches: caches
+  invalidated, User-Agent rules re-synced, toolbar behaviour re-applied;
 - on `runtime.onMessage`: one router call per request;
 - the queue reads its state from storage on first use, persists after every
   transition, and is re-runnable at any time.

@@ -22,6 +22,8 @@ export interface Platform {
   syncUserAgentRules(servers: ServerConfig[], settings: ExtensionSettings): Promise<UserAgentSyncOutcome>;
   activeTabUrl(): Promise<string | null>;
   openOptions(hash?: string): void;
+  /** Open the docked side panel (no-op returning false where unsupported). */
+  openPanel(): Promise<boolean>;
   permissions: {
     contains(origin: string): Promise<boolean>;
     request(origin: string): Promise<boolean>;

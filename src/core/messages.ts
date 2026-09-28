@@ -12,6 +12,8 @@ import type {
   SearchSpec,
   ServerConfig,
   ServerConfigView,
+  SearchHistoryEntry,
+  DownloadHistoryEntry,
   ValidationResult,
 } from '../shared/types.js';
 
@@ -37,12 +39,20 @@ export type UiRequest =
   | { type: 'queue/list' }
   | { type: 'queue/enqueue'; payload: { items: EnqueueInput[] } }
   | { type: 'queue/enqueuePosts'; payload: { serverId: string; posts: EnqueueCandidate[] } }
-  | { type: 'queue/run' }
+  | { type: 'queue/run'; payload?: { itemIds?: string[] } }
   | { type: 'queue/pause' }
   | { type: 'queue/resume' }
   | { type: 'queue/retryFailed' }
   | { type: 'queue/clear'; payload: { scope: 'completed' | 'failed' | 'all' } }
   | { type: 'queue/cancel'; payload: { itemId: string } }
+  | { type: 'queue/remove'; payload: { itemIds: string[] } }
+  | { type: 'history/list' }
+  | { type: 'history/remove'; payload: { serverId: string; postId: string } }
+  | { type: 'history/clear' }
+  | { type: 'searches/list'; payload?: { serverId?: string | null } }
+  | { type: 'searches/add'; payload: { serverId: string; query: string } }
+  | { type: 'searches/remove'; payload: { serverId: string; query: string } }
+  | { type: 'searches/clear'; payload?: { serverId?: string | null } }
   | { type: 'settings/get' }
   | { type: 'settings/save'; payload: Partial<ExtensionSettings> }
   | { type: 'settings/reset' }
@@ -83,6 +93,14 @@ export interface ResponseMap {
   'queue/retryFailed': { requeued: number; summary: QueueSummary };
   'queue/clear': { removed: number; summary: QueueSummary };
   'queue/cancel': { summary: QueueSummary };
+  'queue/remove': { removed: number; summary: QueueSummary };
+  'history/list': { entries: DownloadHistoryEntry[]; total: number };
+  'history/remove': { removed: number; total: number };
+  'history/clear': { removed: number };
+  'searches/list': { entries: SearchHistoryEntry[] };
+  'searches/add': { entries: SearchHistoryEntry[] };
+  'searches/remove': { entries: SearchHistoryEntry[] };
+  'searches/clear': { removed: number };
   'settings/get': ExtensionSettings;
   'settings/save': ExtensionSettings;
   'settings/reset': ExtensionSettings;

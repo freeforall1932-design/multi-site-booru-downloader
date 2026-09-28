@@ -13,6 +13,7 @@ import { registerBuiltinAdapters } from '../adapters/index.js';
 import { BooruClient } from '../core/client.js';
 import { ChromeDownloader } from '../core/downloads.js';
 import type { UiRequest } from '../core/messages.js';
+import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -24,7 +25,9 @@ import { HttpClient } from '../shared/http.js';
 
 registerBuiltinAdapters();
 
-const VERSION = globalThis.chrome?.runtime?.getManifest?.().version ?? '0.1.0';
+const VERSION = globalThis.chrome?.runtime?.getManifest?.().version ?? '0.2.0';
+const POPUP_PATH = 'popup/popup.html';
+const PANEL_PATH = 'panel/panel.html';
 const area = new ChromeStorageArea();
 const settings = new SettingsStore(area);
 const servers = new ServerStore(area);
@@ -32,7 +35,9 @@ const http = new HttpClient({ maxRetries: 3 });
 const validation = new ValidationService(http);
 const client = new BooruClient({ servers, settings, http, validation });
 const downloader = new ChromeDownloader();
-const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader });
+const history = new DownloadHistoryStore(area);
+const searches = new SearchHistoryStore(area);
+const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history });
 
 const handle = createRouter({
   client,
@@ -41,9 +46,44 @@ const handle = createRouter({
   settings,
   downloader,
   syncUserAgentRules,
+  storage: area,
+  history,
+  searches,
   environment: 'extension',
   version: VERSION,
 });
+
+/**
+ * Decide what a toolbar click opens (Settings → "Toolbar click opens").
+ *
+ * `sidepanel` (default) clears the popup and lets Chrome open the docked panel
+ * (`openPanelOnActionClick`); `popup` restores the classic popup page - and, on
+ * browsers without the sidePanel API, that is the only option that works.
+ */
+async function applyUiMode(reason: string): Promise<void> {
+  const current = await settings.get();
+  const wantsPanel = current.uiMode !== 'popup';
+  const sidePanel = globalThis.chrome?.sidePanel;
+  const action = globalThis.chrome?.action;
+  const panelAvailable = typeof sidePanel?.setPanelBehavior === 'function';
+  const usePanel = wantsPanel && panelAvailable;
+  try {
+    if (panelAvailable) {
+      await sidePanel!.setPanelBehavior({ openPanelOnActionClick: usePanel });
+      // Make sure the panel is usable again even if a previous profile disabled
+      // it (or the path changed between versions).
+      await sidePanel!.setOptions?.({ path: PANEL_PATH, enabled: true });
+    }
+  } catch (error) {
+    console.warn('[booru] side panel behaviour could not be set:', error instanceof Error ? error.message : String(error));
+  }
+  try {
+    await action?.setPopup?.({ popup: usePanel ? '' : POPUP_PATH });
+  } catch (error) {
+    console.warn('[booru] action popup could not be set:', error instanceof Error ? error.message : String(error));
+  }
+  console.info(`[booru] toolbar opens ${usePanel ? 'the side panel' : 'the popup'} (${reason})`);
+}
 
 async function refreshUserAgentRules(reason: string): Promise<void> {
   try {
@@ -62,6 +102,7 @@ async function refreshUserAgentRules(reason: string): Promise<void> {
 globalThis.chrome?.runtime?.onInstalled?.addListener((details) => {
   void (async () => {
     await migrateStorage(area);
+    await applyUiMode(`install:${details.reason}`);
     await refreshUserAgentRules(`install:${details.reason}`);
     const count = await servers.count();
     console.info(`[booru] Booru Server Manager ${VERSION} ready - ${count} saved server profile(s)`);
@@ -70,15 +111,26 @@ globalThis.chrome?.runtime?.onInstalled?.addListener((details) => {
 
 globalThis.chrome?.runtime?.onStartup?.addListener(() => {
   void (async () => {
+    await applyUiMode('startup');
     await refreshUserAgentRules('startup');
   })();
 });
+
+// The worker starts cold for every message burst, so re-apply the stored choice
+// on load: a `popup`-mode profile must not lose its popup after a restart.
+void applyUiMode('worker-start');
 
 // Another context wrote settings/servers: drop caches so the worker re-reads them.
 globalThis.chrome?.storage?.onChanged?.addListener((changes, areaName) => {
   if (areaName !== 'local') return;
   if (STORAGE_KEYS.servers in changes) servers.invalidate();
   if (STORAGE_KEYS.settings in changes) settings.invalidate();
+  if (STORAGE_KEYS.history in changes) history.invalidate();
+  if (STORAGE_KEYS.searches in changes) searches.invalidate();
+  if (STORAGE_KEYS.settings in changes) {
+    const next = changes[STORAGE_KEYS.settings]?.newValue as { uiMode?: string } | undefined;
+    if (next?.uiMode) void applyUiMode('settings-change');
+  }
 });
 
 globalThis.chrome?.runtime?.onMessage?.addListener((message, _sender, sendResponse) => {

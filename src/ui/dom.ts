@@ -9,7 +9,12 @@ export interface ElProps {
   loading?: string;
   hidden?: boolean;
   autocomplete?: string;
+  spellcheck?: string;
+  for?: string;
+  inputmode?: string;
+  list?: string;
   maxlength?: number | string;
+  accept?: string;
   colspan?: number | string;
   onclick?: (event: Event) => void;
   oninput?: (event: Event) => void;

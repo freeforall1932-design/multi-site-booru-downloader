@@ -1,8 +1,8 @@
 {
   "name": "booru-server-manager",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "One browser extension, many saved booru servers: server manager + unified downloader for e621, Danbooru and Gelbooru family sites.",
+  "description": "One browser extension, many saved booru servers: a side-panel server manager + downloader for e621, Danbooru and Gelbooru family sites.",
   "type": "module",
   "engines": {
     "node": ">=20"

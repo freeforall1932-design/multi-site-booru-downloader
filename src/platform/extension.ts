@@ -89,10 +89,35 @@ export class ExtensionPlatform implements Platform {
     if (suffix) globalThis.location.hash = suffix;
   }
 
+  /**
+   * Open the docked side panel. Chrome only allows this from a user gesture
+   * (toolbar click, popup button, options-page link); the toolbar path is handled
+   * by `openPanelOnActionClick` in the worker instead.
+   */
+  async openPanel(): Promise<boolean> {
+    const sidePanel = globalThis.chrome?.sidePanel;
+    if (!sidePanel?.open) return false;
+    try {
+      const [tab] = await globalThis.chrome.tabs.query({ active: true, lastFocusedWindow: true });
+      if (tab?.windowId !== undefined) {
+        await sidePanel.open({ windowId: tab.windowId });
+        return true;
+      }
+      if (tab?.id !== undefined) {
+        await sidePanel.open({ tabId: tab.id });
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   async describeEnvironment(): Promise<Record<string, string>> {
     return {
       'Manifest version': String(globalThis.chrome?.runtime?.getManifest?.().manifest_version ?? 'unknown'),
       'Extension version': String(globalThis.chrome?.runtime?.getManifest?.().version ?? 'unknown'),
+      'Docked side panel': globalThis.chrome?.sidePanel ? 'available' : 'unavailable',
       'User-Agent rewriting': globalThis.chrome?.declarativeNetRequest ? 'available' : 'unavailable',
       'Native downloads': globalThis.chrome?.downloads ? 'available' : 'unavailable',
     };

@@ -1,5 +1,12 @@
 import { BooruError } from '../shared/errors.js';
-import type { BooruPost, ExtensionSettings, FailureKind, ServerConfig } from '../shared/types.js';
+import type {
+  BooruPost,
+  DownloadHistoryEntry,
+  ExtensionSettings,
+  FailureKind,
+  SearchHistoryEntry,
+  ServerConfig,
+} from '../shared/types.js';
 import { deepClone } from '../shared/util.js';
 import type { BooruClient } from './client.js';
 import type { Downloader } from './downloads.js';
@@ -9,8 +16,10 @@ import type { DownloadQueue } from './queue.js';
 import { getAdapter } from './registry.js';
 import type { ServerStore } from './servers.js';
 import { toServerView } from './servers.js';
+import { DownloadHistoryStore, SearchHistoryStore } from './history.js';
+import { composeSearchTags } from './search.js';
 import type { SettingsStore } from './settings.js';
-import { STORAGE_KEYS } from './storage.js';
+import { STORAGE_KEYS, type StorageArea } from './storage.js';
 
 export interface RouterDeps {
   client: BooruClient;
@@ -19,6 +28,11 @@ export interface RouterDeps {
   settings: SettingsStore;
   downloader: Downloader;
   syncUserAgentRules?: (servers: ServerConfig[], settings: ExtensionSettings) => Promise<{ ok: boolean; applied: number; error?: string }>;
+  /** Storage used by the side panel's history notebooks (optional in tests). */
+  storage?: StorageArea;
+  /** Pre-built history stores (the worker reuses them with the queue). */
+  history?: DownloadHistoryStore;
+  searches?: SearchHistoryStore;
   environment: 'extension' | 'preview';
   version: string;
 }
@@ -33,6 +47,8 @@ export type UiMessageHandler = (request: UiRequest) => Promise<RouterResponse>;
  * No response in this file contains an unmasked secret.
  */
 export function createRouter(deps: RouterDeps): UiMessageHandler {
+  const historyStore = deps.history ?? (deps.storage ? new DownloadHistoryStore(deps.storage) : null);
+  const searchStore = deps.searches ?? (deps.storage ? new SearchHistoryStore(deps.storage) : null);
   /** Resolve a post (by URL, by id, or the default server) and save the file. */
   async function downloadPost(options: { serverId?: string | null; postId?: string; url?: string }) {
     let post: BooruPost;
@@ -67,7 +83,12 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
         tagSeparator: settings.tagSeparator,
       },
     });
-    const outcome = await deps.downloader.download({ url: post.fileUrl, filename: path.fullPath, conflictAction: 'uniquify' });
+    const target = settings.filePreference === 'sample' && post.sampleUrl ? post.sampleUrl : post.fileUrl;
+    const outcome = await deps.downloader.download({
+      url: target,
+      filename: path.fullPath,
+      conflictAction: settings.duplicateBehaviour === 'overwrite' ? 'overwrite' : 'uniquify',
+    });
     return { filename: path.fullPath, post, viaFallback: outcome.viaFallback, downloadId: outcome.downloadId };
   }
 
@@ -124,8 +145,14 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
         return deps.servers.importServers(request.payload.json, { includeSecrets: request.payload.includeSecrets === true });
 
       // -------------------------------------------------------------- browse
-      case 'browse/search':
-        return deps.client.search(request.payload.serverId, request.payload.spec);
+      case 'browse/search': {
+        // The shared layer adds the tag blacklist (adapters do not know about it);
+        // the *global suffix* is appended by the adapters themselves, so it must
+        // not be added here as well.
+        const settings = await deps.settings.get();
+        const composed = composeSearchTags({ tags: request.payload.spec.tags ?? '', blacklist: settings.tagBlacklist });
+        return deps.client.search(request.payload.serverId, { ...request.payload.spec, tags: composed.tags });
+      }
 
       case 'posts/get':
         return deps.client.getPost(request.payload.serverId, request.payload.postId);
@@ -163,8 +190,9 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
       }
 
       case 'queue/run':
-        // Fire and forget - the UI polls `queue/list` for progress.
-        void deps.queue.run();
+        // Fire and forget - the UI polls `queue/list` for progress. `itemIds`
+        // restricts the run to the ticked rows (panel "Download selected").
+        void deps.queue.run({ onlyIds: request.payload?.itemIds });
         return { started: true, summary: deps.queue.summary() };
 
       case 'queue/pause':
@@ -191,6 +219,47 @@ export function createRouter(deps: RouterDeps): UiMessageHandler {
         return { summary: deps.queue.summary() };
 
       // ------------------------------------------------------------ settings
+      case 'queue/remove': {
+        const removed = await deps.queue.remove(request.payload.itemIds);
+        const summary = deps.queue.summary();
+        return { removed, summary };
+      }
+
+      // ------------------------------------------------------------- history
+      case 'history/list': {
+        const entries = historyStore ? await historyStore.list() : [];
+        return { entries, total: entries.length };
+      }
+
+      case 'history/remove': {
+        if (!historyStore) return { removed: 0, total: 0 };
+        const removed = await historyStore.remove(request.payload.serverId, request.payload.postId);
+        return { removed, total: await historyStore.size() };
+      }
+
+      case 'history/clear': {
+        const removed = historyStore ? await historyStore.clear() : 0;
+        return { removed };
+      }
+
+      case 'searches/list':
+        return { entries: searchStore ? await searchStore.list(request.payload?.serverId ?? null) : [] };
+
+      case 'searches/add': {
+        if (!searchStore) return { entries: [] };
+        const settings = await deps.settings.get();
+        if (!settings.searchHistoryEnabled || settings.searchHistoryLimit === 0) {
+          return { entries: await searchStore.list(request.payload.serverId) };
+        }
+        return { entries: await searchStore.add(request.payload.serverId, request.payload.query, settings.searchHistoryLimit) };
+      }
+
+      case 'searches/remove':
+        return { entries: searchStore ? await searchStore.remove(request.payload.serverId, request.payload.query) : [] };
+
+      case 'searches/clear':
+        return { removed: searchStore ? await searchStore.clear(request.payload?.serverId ?? null) : 0 };
+
       case 'settings/get':
         return deps.settings.get();
 
