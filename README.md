@@ -49,11 +49,14 @@ The design and every setting are documented in
 - **Queue** — the row list with live status, per-row cancel/remove, retry failed,
   clear finished, reset history, clear list, and a fixed dock with a concurrency
   segmented control, an original/sample quality select and *Download selected*.
-- **Links** — the mirror-link collector: walks a creator's posts through a
-  creator-archive API (Kemono / Coomer / Pawchive), keeps every off-site download
-  link it finds (Drive, Mega, MediaFire, …) in a durable list, groups them by post
-  or provider, queues the ticked ones, and exports/imports the whole list as a
-  `.txt` that round-trips.
+- **Links** — the mirror-link collector, organised as **download tasks**: walks a
+  creator's posts through a creator-archive API (Kemono / Coomer / Pawchive) and
+  keeps every off-site download link it finds (Drive, Mega, MediaFire, …) as one
+  task per creator. A task shows how many of its files are saved, which failed,
+  when it last ran, and offers *Download missing* (new files **and** retries),
+  *Rescan* (new uploads), *Pause* and *Export package*. The package — a `.json`
+  manifest plus the grouped `.txt` list — can be sent to someone else, who opens
+  it with the same extension and gets the same task, idle, ready to run.
 - **Servers** — the full multi-account manager plus diagnostics in one scroll.
 - **Settings** — sectioned settings (global behaviour, download behaviour, list
   results, search behaviour, name template, interface, advanced behaviour,
@@ -94,15 +97,22 @@ The design and every setting are documented in
   re-running a search only lists what you do not have yet; reset it any time.
 - **Mirror links** — a second kind of queue row, for files that live off-site.
   Link rows download the URL directly (no adapter, no post lookup, no rating), so
-  a `.txt` exported on one machine can be imported on a fresh profile and queued
-  with no server configured at all. They respect the same slow concurrency and
-  request spacing as every other row, and a URL is never queued twice.
+  a package exported on one machine can be imported on a fresh profile and
+  downloaded with no server configured at all. They respect the same slow
+  concurrency and request spacing as every other row, and a URL is never queued
+  twice.
+- **Download tasks** — "is this artist finished?" answered without any bookkeeping
+  by hand: every file remembers its post, its provider and its outcome, the task
+  counts what is done/failed/missing, and each pass is recorded in a run history
+  (when, how many posts scanned, what was added, what came in). Re-importing a
+  package or re-collecting a creator merges into the existing task instead of
+  duplicating it.
 
 **Quality**
 
 - One shared adapter contract; the UI never branches on site type.
-- 455 automated tests (adapters, shared services, message router, HTTP layer, the
-  mirror-link rules and export/import round-trip, the panel's
+- 478 automated tests (adapters, shared services, message router, HTTP layer, the
+  mirror-link rules, the task/package round-trip and export/import, the panel's
   page/query/template/history logic) and a strict TypeScript build.
 - An offline **browser preview harness** (`npm run preview`) that runs the real
   UI - side panel included - against mock booru APIs, including a demo creator
@@ -178,8 +188,9 @@ rating filter is spelled `-explicit` etc.
 Creator archives are the one family whose *real* downloads are usually not on the
 site at all: a post body says "the pack is on Mega" and links there. Every
 Kemono-family profile therefore also works with the panel's **Links** tab, which
-collects those off-site links (see [docs/SIDEPANEL.md](docs/SIDEPANEL.md#links-tab-mirror-links)),
-keeps them in a durable list and can export or re-import them as `.txt`.
+collects those off-site links into a **download task** per creator
+(see [docs/SIDEPANEL.md](docs/SIDEPANEL.md#links-tab-download-tasks)) and can
+export, re-import or hand that task to someone else as a small package.
 
 **Deliberately not included** (checked against the Droidbooru reference client in
 `reference/`): IBSearch (site is gone), Shimmie 2 and ZeroChan (HTML scraping
@@ -308,7 +319,8 @@ src/
   core/        adapter contract + registry, storage, settings, servers, validation,
                client, queue, naming, downloads, history notebooks, page ranges,
                search composition, template editor, User-Agent rules, router,
-               mirror-link rules + export/import, mirror-link store
+               mirror-link rules + export/import, mirror-link store, download
+               tasks (planning, stats, manifests) + task store
   adapters/    e621, danbooru, gelbooru (+ factory for Gelbooru-family forks)
   platform/    Chrome MV3 platform, preview platform, lazy façade
   ui/          DOM helpers and view builders (server list, form, browse, queue,
@@ -337,6 +349,7 @@ userscripts/   the standalone Pawchive Link Collector userscript + its README
 | [docs/ADAPTER_CONTRACT.md](docs/ADAPTER_CONTRACT.md) | The full adapter contract + how to add a new booru in ~200 lines |
 | [docs/SECURITY.md](docs/SECURITY.md) | Credential storage, redaction rules, what never leaves the browser |
 | [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md) | Step-by-step manual test plan with expected results |
+| [docs/TASKS.md](docs/TASKS.md) | Download tasks explained: the "send it to a friend" model, every design option that was considered, and what is parked |
 | [docs/WORKLIST.md](docs/WORKLIST.md) | Implemented scope, known gaps and next steps |
 | [userscripts/README.md](userscripts/README.md) | The standalone Pawchive Link Collector userscript (install, usage, Greasy Fork link) |
 
@@ -344,8 +357,9 @@ userscripts/   the standalone Pawchive Link Collector userscript + its README
 
 Version 0.2.0 — e621, Danbooru and Gelbooru plus the Gelbooru-fork, Moebooru,
 Philomena, Hydrus and Kemono families are implemented against their APIs, the side
-panel is the primary surface, the Links tab collects and re-imports off-site
-mirror links for creator archives, and an adapter conformance suite
+panel is the primary surface, the Links tab collects off-site mirror links for
+creator archives as portable download tasks (export a package, a friend imports
+it, nothing downloads twice), and an adapter conformance suite
 guards any new site. See [docs/WORKLIST.md](docs/WORKLIST.md) for what is done and
 what is deliberately left for later (e.g. per-site uploads, tag autocomplete,
 archive/PDF picture packing).

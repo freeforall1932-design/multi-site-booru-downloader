@@ -7,6 +7,7 @@ import type {
   FailureKind,
   MirrorLink,
   MirrorLinkStats,
+  TaskView,
   QueueItem,
   QueueSummary,
   Rating,
@@ -41,12 +42,20 @@ export type UiRequest =
   | { type: 'routes/detect'; payload: { url: string } }
   | { type: 'links/list' }
   | { type: 'links/posts'; payload: { serverId: string; query: string; page: number } }
-  | { type: 'links/scanPost'; payload: { serverId: string; postId: string; postUrl?: string | null; postTitle?: string | null; creator?: string | null } }
+  | { type: 'links/scanPost'; payload: { serverId: string; postId: string; postUrl?: string | null; postTitle?: string | null; creator?: string | null; taskId?: string | null } }
   | { type: 'links/queue'; payload: { ids: string[] } }
   | { type: 'links/remove'; payload: { ids: string[] } }
   | { type: 'links/clear'; payload: { scope?: 'all' | 'done' | 'pending' } }
   | { type: 'links/export'; payload: { grouping?: LinkExportGrouping } }
   | { type: 'links/import'; payload: { text: string; queue?: boolean; serverId?: string | null } }
+  | { type: 'tasks/list' }
+  | { type: 'tasks/begin'; payload: { serverId: string; query: string; name?: string | null } }
+  | { type: 'tasks/import'; payload: { text: string; filename?: string | null; serverId?: string | null } }
+  | { type: 'tasks/export'; payload: { taskId: string } }
+  | { type: 'tasks/run'; payload: { taskId: string; mode?: 'missing' | 'all'; start?: boolean } }
+  | { type: 'tasks/pause'; payload: { taskId: string } }
+  | { type: 'tasks/rescan'; payload: { taskId: string; maxPosts?: number } }
+  | { type: 'tasks/remove'; payload: { taskId: string; keepFiles?: boolean } }
   | { type: 'queue/list' }
   | { type: 'queue/enqueue'; payload: { items: EnqueueInput[] } }
   | { type: 'queue/enqueuePosts'; payload: { serverId: string; posts: EnqueueCandidate[] } }
@@ -104,6 +113,23 @@ export interface ResponseMap {
   'links/clear': { removed: number; links: MirrorLink[]; stats: MirrorLinkStats };
   'links/export': { text: string; filename: string; count: number; grouping: LinkExportGrouping };
   'links/import': { parsed: number; added: number; updated: number; queued: number; invalid: number; links: MirrorLink[]; stats: MirrorLinkStats };
+  'tasks/list': { tasks: TaskView[] };
+  'tasks/begin': { task: TaskView; created: boolean };
+  'tasks/import': {
+    kind: 'json' | 'txt' | 'unknown';
+    created: boolean;
+    parsed: number;
+    added: number;
+    updated: number;
+    invalid: number;
+    task: TaskView | null;
+    error: string | null;
+  };
+  'tasks/export': { files: Array<{ filename: string; text: string; mime: string }>; count: number; task: TaskView };
+  'tasks/run': { task: TaskView; queued: number; skipped: number; invalid: number; started: boolean; plan: { alreadyDone: number; alreadyQueued: number; retrying: number; total: number } };
+  'tasks/pause': { task: TaskView; cancelled: number };
+  'tasks/rescan': { task: TaskView; scannedPosts: number; added: number; failed: number; hasMore: boolean };
+  'tasks/remove': { removed: boolean };
   'queue/list': { summary: QueueSummary; items: QueueItem[]; maxConcurrency: number };
   'queue/enqueue': { added: number; skipped: number; summary: QueueSummary };
   'queue/enqueuePosts': { added: number; skipped: number; summary: QueueSummary };

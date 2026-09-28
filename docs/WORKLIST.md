@@ -28,7 +28,10 @@ collector (`0.2.x`).
 | Philomena family: derpibooru, furbooru, ponybooru (comma query syntax, ratings as tags, filter pinning) | ✅ | `src/adapters/philomena.ts` |
 | Hydrus Client API (local http, access key, two-step listing → metadata) | ✅ | `src/adapters/hydrus.ts` |
 | Kemono / Coomer / Pawchive creator archives (attachment rows with composite ids, per-node file hosts) | ✅ | `src/adapters/kemono.ts` |
-| **Mirror-link collector (Links tab)**: walks a creator's posts, harvests the off-site download links in their bodies, keeps them in a durable list, groups/ticks/queues them, exports and re-imports the list as `.txt` | ✅ | `src/core/links.ts`, `src/core/link-store.ts`, `src/ui/panel-links.ts`, `src/panel/panel.ts`, [docs/SIDEPANEL.md#links-tab-mirror-links](SIDEPANEL.md#links-tab-mirror-links) |
+| **Mirror-link collector (Links tab)**: walks a creator's posts, harvests the off-site download links in their bodies, keeps them in a durable list, groups/ticks/queues them, exports and re-imports the list as `.txt` | ✅ | `src/core/links.ts`, `src/core/link-store.ts`, `src/ui/panel-links.ts`, `src/panel/panel.ts`, [docs/SIDEPANEL.md#links-tab-download-tasks](SIDEPANEL.md#links-tab-download-tasks) |
+| **Download tasks**: one task per creator (site + service + creator), files joined to it, per-file outcome, completion states (complete/partial/failed/in-progress), run history, *Download missing* (new + retries, never re-download), *Pause*, *Rescan* (incremental) | ✅ | `src/core/tasks.ts`, `src/core/task-store.ts`, `bsm.tasks`, `tasks/*` in `src/core/router.ts` |
+| **Task packages**: export writes the `.json` manifest *and* the grouped `.txt`; import reads either half (manifest, our `.txt`, a userscript export, a hand-written list) and merges into the existing task; nothing downloads on import | ✅ | `src/core/tasks.ts` (`formatTaskManifest`, `parseTaskPackage`), `src/core/router.ts` (`tasks/export`, `tasks/import`) |
+| Design record for the "torrent-like" behaviour: every option considered, what shipped, what is parked (hashes, pre-known sizes, task scheduling, a 6th tab) | ✅ | [docs/TASKS.md](TASKS.md) |
 | `link` queue rows: off-site URLs download without an adapter, a post lookup or a rating, keyed by URL so the same file is never queued twice | ✅ | `src/core/queue.ts` (`enqueueLinks`, `processLinkItem`, `syncLinkRow`) |
 | Standalone **Pawchive Link Collector** userscript shipped next to the extension (same rules, no extension needed) | ✅ | `userscripts/pawchive-link-collector.user.js`, `userscripts/README.md` |
 | Fixture tests for every added family from live-captured response shapes | ✅ | `tests/adapters/families.test.ts` |
@@ -38,19 +41,20 @@ collector (`0.2.x`).
 | Popup + content-script download button | ✅ | `src/popup/popup.ts`, `src/content/post-button.ts` |
 | Diagnostics + credential-free traces | ✅ | `src/ui/diagnostics-view.ts`, `src/core/router.ts` |
 | Offline preview harness + mock booru | ✅ | `dev/preview/`, `src/preview/`, `scripts/preview-server.mjs` |
-| Tests for adapters and shared logic | ✅ | `tests/` — 455 tests, all passing (incl. the mirror-link rules, export/import round-trip and panel logic) |
+| Tests for adapters and shared logic | ✅ | `tests/` — 478 tests, all passing (incl. the mirror-link rules, the task/package round-trip and panel logic) |
 | Docs | ✅ | `README.md`, `docs/{SIDEPANEL,ARCHITECTURE,ADAPTER_CONTRACT,SECURITY,MANUAL_TESTS,WORKLIST}.md`, `userscripts/README.md` |
 
 ### Verification snapshot
 
 ```
 npm run typecheck   → clean (src + tests, strict TS, noUncheckedIndexedAccess)
-npm test            → 455 passed (14 files)
+npm test            → 478 passed (15 files)
 npm run build       → dist/ with manifest, 4 icons, build-info.json
-npm run smoke       → 86/86 checks against the built dist/ bundle (incl. booting
+npm run smoke       → 91/91 checks against the built dist/ bundle (incl. booting
                       the built panel bundle, driving a query and a full
                       mirror-link collection through it, walking all five panel
-                      tabs incl. Links, and booting the options bundle)
+                      tabs incl. Links, exporting a task package and reading it
+                      back, and booting the options bundle)
 npm run preview     → harness + side panel/options/popup served on :4173, with a
                       demo creator whose posts carry mirror links
 ```
@@ -64,6 +68,7 @@ npm run preview     → harness + side panel/options/popup served on :4173, with
 | `tests/adapters/gelbooru.test.ts` | 24 | DAPI envelope, query-with-userid auth, fork factory |
 | `tests/core/router.test.ts` | 35 | entire message protocol end-to-end against the mock APIs |
 | `tests/core/links.test.ts` | 30 | link rules, payload extraction, export/import round-trip, store merge rules, `link` rows, the `links/*` flow |
+| `tests/core/tasks.test.ts` | 23 | task identity, statistics/completion, run planning, the package round-trip between two machines, pause/rescan, run history |
 | `tests/core/panel-core.test.ts` | 35 | page ranges, query composition, template editor, history notebooks, panel settings keys |
 | `tests/core/panel-router.test.ts` | 12 | selective runs, row removal, history/search messages, blacklist + suffix, sample/overwrite preferences |
 | `tests/core/http.test.ts` | 26 | rate limiter, retries, abort, redaction, JSON/HTML/empty bodies |
@@ -100,6 +105,20 @@ by the suite. Live behaviour is covered by `docs/MANUAL_TESTS.md`.
 - **Re-collecting a creator never duplicates work.** The link store merges by URL
   id and keeps an existing `done`/`failed` outcome, so a second scan of the same
   creator only refreshes the post context and reports duplicates.
+- **"Download missing" is the only bulk action a task needs.** It queues files
+  that are `new` *and* files that `failed` - a retry is the same button - and
+  never a file that is `done`. That is the whole re-run strategy: new posts appear
+  via *Rescan*, failures come back through the same press, and nothing already on
+  disk is fetched twice.
+- **A task is traced, not guessed.** Every file keeps its post id, post URL,
+  post title, provider and site; the task keeps the posts it scanned and a run
+  history (when, how many posts, how many added/queued/saved/failed). "Complete /
+  partial / failed" is computed from those records, never inferred from the
+  filesystem.
+- **Storage writes are serialised.** `MirrorLinkStore` and `TaskStore` chain their
+  mutations: two concurrent queue workers settling two files used to race on a
+  read-modify-write of the whole list and lose one status change (found by the
+  task tests, fixed in `src/core/link-store.ts`).
 
 - **Exactly one default** profile always exists once at least one server is saved
   (first save wins, deleting the default promotes the next row).
@@ -130,6 +149,8 @@ by the suite. Live behaviour is covered by `docs/MANUAL_TESTS.md`.
 | Chrome/Edge/Brave only | Built on `chrome.*` MV3 APIs. Firefox would need a `browser.*` shim and manifest tweaks. |
 | No i18n | All strings are English literals in the view layer. |
 | Mirror links are not resolved | The collector stores and downloads the URL a post links to; it does not follow provider redirects to a direct file (Mega/Drive landing pages stay pages). A resolver per provider would be a plugin of its own. |
+| No content hashes in a task package | A `.torrent` verifies pieces; here the bytes sit behind provider pages that the sites never hash. The manifest records what the exporting machine observed (status, filename, bytes) and nothing more - see [docs/TASKS.md](TASKS.md) §4. |
+| No task-level scheduler | Tasks start when pressed. Per-task concurrency, start times and a queue of tasks are parked until the model earns them. |
 | Preview modules ship inside `dist/` | `dist/preview/*.js` is inert in the extension (the UI only imports it when `chrome.runtime.id` is missing); excluding it from the build would shave a few KB. |
 | No release packaging | `dist/` is loadable unpacked; a zipped CRX/XPI and a CI workflow are not set up yet. |
 

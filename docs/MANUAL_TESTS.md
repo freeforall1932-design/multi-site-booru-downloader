@@ -1,7 +1,8 @@
 # Manual test plan
 
-The automated suite (455 tests) covers the adapters, the shared services, the
-panel's shared logic, the mirror-link rules and the message protocol. This document covers what only a
+The automated suite (478 tests) covers the adapters, the shared services, the
+panel's shared logic, the mirror-link rules, download tasks and the message
+protocol. This document covers what only a
 human can check: the real extension in a real browser, the UI states, and the
 failure messages a user sees.
 
@@ -204,6 +205,33 @@ button on purpose.
 | 5a.13 | Reload the panel (and the browser) | The collected list and each row's status (queued/done/failed, saved filename) are still there - `bsm.links` is persistent storage |
 | 5a.14 | Feed a userscript export (the `Creator:`/`Collected:` preamble, bare URLs) into **Import .txt…** | It imports: `#` lines are comments, bullets are stripped, duplicates collapse |
 | 5a.15 | Set **Mirror folder template** to `mirrors/{provider}/{date}` and queue one link | The saved path follows the URL tokens (`mirrors/Mega/2026-09-29/<name>`), not the post's naming template |
+
+## 5b. Download tasks and the package [V]
+
+The preview's demo creator is enough to walk the whole "send it to a friend" flow:
+collect, download the missing files, pause, rescan, export the package, then import
+that same file into a **fresh** preview (Reset preview data clears it) and watch it
+come back as one idle task.
+
+| # | Steps | Expected |
+| --- | --- | --- |
+| 5b.1 | Links tab → *Collect links* for `fanbox/1245946` | One **task card** appears, named `1245946 · fanbox`, with a `pawchive` / `fanbox` badge, `n/n file(s) saved`, and a *Download missing (n)* button |
+| 5b.2 | Click the ▸ on the card | The card expands into one row per file, each with its provider badge, its post, its status and its URL |
+| 5b.3 | Press **Download missing (n)** | Toast + notice ("n file(s) queued"); the Queue tab shows the rows; the card turns *downloading* and the counters move as files finish; it ends on **complete** |
+| 5b.4 | Press it again | "Nothing left to download" — every file is already saved, and the card says how many were skipped (`n / n done`) |
+| 5b.5 | **Pause** while files are queued | The task's waiting files leave the queue, the card goes back to "n not downloaded" and the button says *Download missing* again; a download already running is not killed |
+| 5b.6 | Break one link's host (edit the row's URL in devtools, or import a list with a dead URL), then Download missing | Only that file fails; the card reads **partial - some files failed**, the file keeps its error text, and the next *Download missing* queues the failed file again (and never the saved ones) |
+| 5b.7 | **Rescan** a task that was collected already | "0 new post(s) scanned" — the second pass is incremental, it does not walk the creator again from scratch |
+| 5b.8 | Reload the panel and the browser | Task, files, statuses, run history and card expansion state survive (`bsm.tasks`, `bsm.links`) |
+| 5b.9 | **Export package** | Two files download: `<name>_task.json` (manifest with `files` and `runs`) and `<name>_download_links.txt` (grouped list). Both open as plain text |
+| 5b.10 | Open the manifest in a text editor | Readable: `format`, `task` (id/name/site/service/creator), `summary` (total/done/failed/pending/completion), `files` (url, provider, post, status, filename) and `runs` |
+| 5b.11 | Harness page → **Reset preview data**, then Links tab → *Import package…* → pick the `.json` | One task comes back, **idle**, with the same name and file count; the notice reports how many were new vs already known; nothing downloads |
+| 5b.12 | Press **Download missing** on the fresh copy | It queues every file (no server/profile is needed on this side at all) and the queue downloads them slowly |
+| 5b.13 | Import the same package a second time | Merges into the same task: `0 new`, everything reported as already known, statuses unchanged |
+| 5b.14 | Import only the `.txt` half | The same task id is used (the site comes from the post URLs), the files keep their post titles, and they group by post in the expanded card |
+| 5b.15 | Import a userscript export (`Creator:`/`Collected:` preamble, bare URLs) | It imports as a task named after its creator header; `#` lines are ignored, bullets stripped |
+| 5b.16 | Import a hand-written list with no creator (`artist_a_links.txt`) | The task is named `artist a`, its links are "unfiled" until re-imported as a package, and nothing throws on a nonsense line (counted as unreadable) |
+| 5b.17 | Remove a task with ✕ | The card disappears, the files stay in the list (and on disk); *Clear list* then removes the files and drops any task with nothing left |
 
 ## 6. Downloads and naming [V]
 

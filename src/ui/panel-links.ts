@@ -1,24 +1,20 @@
 /**
- * The Links tab - the collector for off-site (mirror) download links.
+ * The Links tab - download tasks (the "package" view) plus the raw link list.
  *
- * Creator archives such as Pawchive, Kemono and Coomer put their real downloads
- * on Google Drive, Mega, MediaFire and friends; the post body carries those URLs
- * and nothing else. This card walks a creator through the site's own API, keeps
- * every link it finds in `bsm.links`, and offers the three things a link list is
- * for:
+ * The tab is organised around **tasks**: one creator on one site, the files that
+ * belong to them, what each file is doing and what the last pass did. That is the
+ * unit a package is exported as and the unit a second person imports - open the
+ * file, see *one task: artist A*, click it and read the brief (how many files,
+ * how many arrived, which failed, when it last ran).
  *
- *   1. **Export** it as a grouped `.txt` (by post or by provider) for an
- *      external download manager, or as a plain URL list someone can read.
- *   2. **Import** that same `.txt` back - the file round-trips - and go straight
- *      to the download queue with it.
- *   3. **Queue** selected links so the extension downloads them itself, slowly,
- *      with the concurrency and request-spacing controls from Settings.
+ * Under the tasks sits the plain link list: everything that is not part of a task
+ * (a bare URL list import, a userscript export, a single link). Both levels use
+ * the same rows, so a file's status reads the same wherever it appears.
  *
- * The card keeps the panel's house style: one status strip, the toolbar row,
- * then the rows. It never talks to a site and never touches storage: everything
- * goes through `UiRequest`s handled by the background worker.
+ * The card never talks to a site and never touches storage: every action goes
+ * through a `UiRequest` handled by the background worker.
  */
-import type { MirrorLink, MirrorLinkFilter, MirrorLinkStats, ServerConfigView } from '../shared/types.js';
+import type { MirrorLink, MirrorLinkFilter, MirrorLinkStats, ServerConfigView, TaskRun, TaskView } from '../shared/types.js';
 import { formatBytes, relativeTime } from '../shared/util.js';
 import { button, h } from './dom.js';
 
@@ -31,11 +27,12 @@ export interface MirrorLinkRow {
   selected: boolean;
 }
 
-export interface MirrorLinkGroup {
-  key: string;
-  title: string;
-  postUrl: string | null;
+export interface TaskCardView {
+  view: TaskView;
   rows: MirrorLinkRow[];
+  /** Files of the task that are not drawn because of the row limit. */
+  hiddenRows: number;
+  expanded: boolean;
 }
 
 export interface LinksState {
@@ -48,10 +45,11 @@ export interface LinksState {
   progress: { done: number; total: number; label: string } | null;
   error: { message: string; kind: string; hint: string | null } | null;
   stats: MirrorLinkStats;
-  groups: MirrorLinkGroup[];
-  selectedCount: number;
-  /** Rows not drawn because of the row limit. */
-  hiddenRows: number;
+  tasks: TaskCardView[];
+  /** Links that belong to no task (bare imports, single URLs). */
+  unfiled: MirrorLinkRow[];
+  unfiledHidden: number;
+  selectionCount: number;
   exportGrouping: LinkExportGrouping;
   filterMode: MirrorLinkFilter;
   /** Duplicate URLs already in the queue, for the notice line. */
@@ -76,12 +74,28 @@ export interface LinksCallbacks {
   onOpenPost(url: string): void;
   onOpenQueue(): void;
   onOpenSettings(): void;
+  // ------------------------------------------------------------ task actions
+  onToggleTask(taskId: string): void;
+  onTaskStart(taskId: string, mode: 'missing' | 'all'): void;
+  onTaskPause(taskId: string): void;
+  onTaskRescan(taskId: string): void;
+  onTaskExport(taskId: string): void;
+  onTaskRemove(taskId: string): void;
 }
 
 const STATUS_LABELS: Record<MirrorLink['status'], string> = {
   new: 'not downloaded',
   queued: 'in the queue',
   done: 'downloaded',
+  failed: 'failed',
+};
+
+const COMPLETION_LABELS: Record<TaskView['completion'], string> = {
+  empty: 'no files yet',
+  idle: 'ready',
+  'in-progress': 'downloading',
+  complete: 'complete',
+  partial: 'partial - some files failed',
   failed: 'failed',
 };
 
@@ -102,7 +116,7 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
       h('h2', { text: 'Mirror links' }),
       h('span', {
         class: 'psMuted psSmall',
-        text: 'Collects the off-site download links inside a creator’s posts (Drive, Mega, MediaFire, …) and keeps them until you export or queue them.',
+        text: 'Collects the off-site download links inside a creator’s posts (Drive, Mega, MediaFire, …) as one task per creator, and keeps them until you export the package or download it.',
       }),
     ),
   );
@@ -165,7 +179,7 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
   container.appendChild(
     h('p', {
       class: 'psHint',
-      text: 'Tip: open the creator page in the tab you came from and paste its address here, or type `service/creatorId` as the site shows it.',
+      text: 'Collecting a creator you already have updates that task: new posts are added, files that failed are retried by Download missing, and files you already saved are left alone.',
     }),
   );
 
@@ -213,6 +227,24 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
     );
   }
 
+  // ------------------------------------------------------------------ package
+  container.appendChild(
+    h(
+      'div',
+      { class: 'psActionRow' },
+      button('Import package…', {
+        variant: 'subtle',
+        title: 'Read a task package (.json) or a link list (.txt) - as exported by this tab, or written by the Pawchive Link Collector userscript. It appears as a task, idle, until you start it.',
+        onClick: () => pickFile((text, name) => callbacks.onImport(text, name)),
+      }),
+      button(`Export .txt`, {
+        title: 'Write the whole collected list to a text file (grouped by post by default). A task exports its own package from its card.',
+        disabled: state.stats.total === 0,
+        onClick: () => callbacks.onExport(state.exportGrouping),
+      }),
+    ),
+  );
+
   // ------------------------------------------------------------------ summary
   container.appendChild(
     h(
@@ -225,62 +257,62 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
     ),
   );
 
-  // ------------------------------------------------------------------ toolbar
-  const allSelected = state.groups.length > 0 && state.groups.every((group) => group.rows.every((row) => row.selected));
-  container.appendChild(
-    h(
-      'div',
-      { class: 'psToolbar' },
+  // ------------------------------------------------------------------- tasks
+  if (state.tasks.length) {
+    const list = h('div', { class: 'psTaskList' });
+    for (const card of state.tasks) list.appendChild(taskCard(card, callbacks));
+    container.appendChild(list);
+  }
+
+  // ------------------------------------------------------------ unfiled links
+  const unfiledIds = state.unfiled.filter((row) => row.selected).map((row) => row.link.id);
+  if (state.unfiled.length || !state.tasks.length) {
+    const toolbar = h('div', { class: 'psToolbar' });
+    toolbar.appendChild(
       h(
         'label',
         { class: 'psCheck' },
         h('input', {
           type: 'checkbox',
-          checked: allSelected,
+          checked: state.unfiled.length > 0 && state.unfiled.every((row) => row.selected),
           on: { change: (event) => callbacks.onSelectAll((event.target as HTMLInputElement).checked) },
         }),
-        h('span', { text: 'Select all' }),
+        h('span', { text: state.tasks.length ? 'Unfiled links' : 'Select all' }),
       ),
-      h('button', { class: 'psTextButton', type: 'button', text: 'Invert', onClick: () => callbacks.onInvert() }),
+    );
+    toolbar.appendChild(h('button', { class: 'psTextButton', type: 'button', text: 'Invert', onClick: () => callbacks.onInvert() }));
+    toolbar.appendChild(
       h('button', {
         class: 'psTextButton',
         type: 'button',
-        text: `Remove selected (${state.selectedCount})`,
-        disabled: state.selectedCount === 0,
+        text: `Remove selected (${unfiledIds.length})`,
+        disabled: unfiledIds.length === 0,
         title: 'Drop these links from the collected list (and their pending queue rows).',
-        onClick: () => callbacks.onRemoveSelected(selectedIds(state)),
+        onClick: () => callbacks.onRemoveSelected(unfiledIds),
       }),
-    ),
-  );
-
-  const selectedNow = selectedIds(state);
-  container.appendChild(
-    h(
-      'div',
-      { class: 'psToolbar psToolbarSecondary' },
-      button(`Add to download queue (${state.selectedCount})`, {
-        variant: 'subtle',
-        disabled: state.selectedCount === 0,
-        title: 'Queue the ticked links. They download one at a time at the request spacing from Settings.',
-        onClick: () => callbacks.onAddToQueue(selectedNow),
-      }),
-      button('Export .txt', {
-        title: 'Write the whole collected list to a text file (grouped by post by default).',
-        disabled: state.stats.total === 0,
-        onClick: () => callbacks.onExport(state.exportGrouping),
-      }),
-      button('Import .txt…', {
-        title: 'Read a list back in - the file this tab exports, or one the userscript wrote.',
-        onClick: () => pickFile((text, name) => callbacks.onImport(text, name)),
-      }),
-    ),
-  );
+    );
+    container.appendChild(toolbar);
+    if (state.unfiled.length) {
+      container.appendChild(
+        h(
+          'div',
+          { class: 'psToolbar psToolbarSecondary' },
+          button(`Add to download queue (${unfiledIds.length})`, {
+            variant: 'subtle',
+            disabled: unfiledIds.length === 0,
+            title: 'Queue the ticked links. They download one at a time at the request spacing from Settings.',
+            onClick: () => callbacks.onAddToQueue(unfiledIds),
+          }),
+        ),
+      );
+    }
+  }
 
   const groupingRow = h('div', { class: 'psRangeRow' });
   groupingRow.appendChild(h('label', { class: 'psRangeLabel', text: 'Export as' }));
   const grouping = h('select', {
     class: 'psSelect',
-    title: 'How the exported file groups its lines.',
+    title: 'How the exported text file groups its lines.',
     on: { change: (event) => callbacks.onExport((event.target as HTMLSelectElement).value as LinkExportGrouping) },
   });
   for (const option of [
@@ -318,7 +350,7 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
           class: 'psTextButton danger',
           type: 'button',
           text: 'Clear list',
-          title: 'Forget every collected link. Queued rows are dropped from the download queue as well.',
+          title: 'Forget every collected link and task. Pending queue rows are dropped as well.',
           onClick: () => callbacks.onClear('all'),
         }),
       ),
@@ -336,8 +368,20 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
     );
   }
 
-  // -------------------------------------------------------------------- rows
-  if (!state.groups.length) {
+  // ---------------------------------------------------------- unfiled rows
+  if (state.unfiled.length) {
+    const list = h('div', { class: 'psQueue psLinkGroups' });
+    for (const row of state.unfiled) list.appendChild(linkRow(row, callbacks));
+    container.appendChild(list);
+  }
+
+  if (state.unfiledHidden > 0) {
+    container.appendChild(
+      h('div', { class: 'psQueueMore', text: `${state.unfiledHidden} more unfiled link(s) not drawn (Settings → Queue rows shown)` }),
+    );
+  }
+
+  if (!state.tasks.length && !state.unfiled.length) {
     container.appendChild(
       h(
         'div',
@@ -348,65 +392,123 @@ export function renderLinksCard(container: HTMLElement, state: LinksState, callb
           class: 'psMuted',
           text: state.busy
             ? 'Scanning… links appear here as they are found.'
-            : 'Pick a Kemono/Coomer/Pawchive profile, paste the creator, then press Collect links. You can also import a .txt written by this tab or by the Pawchive Link Collector userscript.',
+            : 'Pick a Kemono/Coomer/Pawchive profile, paste the creator, then press Collect links - or open a package someone sent you with Import package.',
         }),
       ),
     );
     return;
   }
+}
 
-  const list = h('div', { class: 'psQueue psLinkGroups' });
-  for (const group of state.groups) {
-    const header = h('div', { class: 'psLinkGroup' });
-    header.appendChild(
-      h('span', {
-        class: 'psLinkGroupTitle',
-        text: group.title,
-        title: group.title,
-      }),
-    );
-    if (group.postUrl) {
-      header.appendChild(
-        h('a', {
-          class: 'psMuted psSmall',
-          href: group.postUrl,
-          target: '_blank',
-          rel: 'noreferrer',
-          text: 'open post',
-          onClick: (event) => {
-            event.preventDefault();
-            callbacks.onOpenPost(group.postUrl!);
-          },
-        }),
-      );
-    }
-    header.appendChild(h('span', { class: 'psMuted psSmall', text: `${group.rows.length} link(s)` }));
-    list.appendChild(header);
-    for (const row of group.rows) list.appendChild(linkRow(row, callbacks));
-  }
-  container.appendChild(list);
+// ------------------------------------------------------------------ task card
 
-  if (state.hiddenRows > 0) {
-    container.appendChild(
-      h('div', { class: 'psQueueMore', text: `${state.hiddenRows} more link(s) not drawn (Settings → Queue rows shown)` }),
-    );
-  }
+function taskCard(card: TaskCardView, callbacks: LinksCallbacks): HTMLElement {
+  const { task, stats, completion, lastRun } = card.view;
+  const element = h('div', { class: `psTask psTask-${completion}`, dataset: { taskId: task.id } });
 
-  container.appendChild(
-    h('p', {
-      class: 'psHint',
-      text: 'Hosting pages that need a login or a script (Drive folders, Mega landing pages) cannot be fetched by a browser download: the row will say so, and the exported .txt is the reliable path for those.',
+  const head = h('div', { class: 'psTaskHead' });
+  const title = h('div', { class: 'psTaskTitle' });
+  title.appendChild(
+    h('button', {
+      class: 'psTaskToggle',
+      type: 'button',
+      text: card.expanded ? '▾' : '▸',
+      title: card.expanded ? 'Hide the files' : 'Show the files',
+      ariaLabel: card.expanded ? 'Hide the files' : 'Show the files',
+      onClick: () => callbacks.onToggleTask(task.id),
     }),
   );
+  title.appendChild(h('strong', { text: task.name, title: task.name }));
+  if (task.siteType) title.appendChild(h('span', { class: 'psTypeBadge server', text: task.siteType }));
+  if (task.service) title.appendChild(h('span', { class: 'psMuted psSmall', text: task.service }));
+  title.appendChild(h('span', { class: `psItemStatus ${completion === 'complete' ? 'done' : completion === 'failed' ? 'failed' : completion === 'in-progress' ? 'running' : 'pending'}`, text: COMPLETION_LABELS[completion] }));
+  head.appendChild(title);
+
+  const meta = h('div', { class: 'psItemMeta' });
+  meta.appendChild(h('span', { class: 'psMuted psSmall', text: `${stats.done}/${stats.total} file(s) saved` }));
+  if (stats.failed) meta.appendChild(h('span', { class: 'psMuted psSmall', text: `${stats.failed} failed` }));
+  if (stats.pending) meta.appendChild(h('span', { class: 'psMuted psSmall', text: `${stats.pending} still missing` }));
+  if (stats.bytes !== null) meta.appendChild(h('span', { class: 'psMuted psSmall', text: formatBytes(stats.bytes) }));
+  if (task.lastScanAt) meta.appendChild(h('span', { class: 'psMuted psSmall', text: `scanned ${relativeTime(task.lastScanAt)}` }));
+  meta.appendChild(h('span', { class: 'psMuted psSmall', text: `${task.memberIds.length} file(s) in the task` }));
+  head.appendChild(meta);
+
+  if (lastRun) head.appendChild(h('div', { class: 'psItemMeta' }, h('span', { class: 'psMuted psSmall', text: runLabel(lastRun) })));
+
+  const actions = h('div', { class: 'psTaskActions' });
+  const missing = stats.pending;
+  actions.appendChild(
+    button(missing ? `Download missing (${missing})` : 'Download missing', {
+      variant: 'subtle',
+      disabled: missing === 0,
+      title:
+        'Queue every file of this task that is not saved yet - new files and earlier failures. Files already downloaded are never fetched twice.',
+      onClick: () => callbacks.onTaskStart(task.id, 'missing'),
+    }),
+  );
+  if (stats.queued) {
+    actions.appendChild(
+      button('Pause', {
+        variant: 'danger',
+        title: 'Drop the files of this task that are still waiting in the queue. A download already running is not interrupted.',
+        onClick: () => callbacks.onTaskPause(task.id),
+      }),
+    );
+  }
+  actions.appendChild(
+    button('Rescan', {
+      variant: 'ghost',
+      title: 'Look for posts the task has not scanned yet (new uploads) and add their files.',
+      disabled: !task.query,
+      onClick: () => callbacks.onTaskRescan(task.id),
+    }),
+  );
+  actions.appendChild(
+    button('Export package', {
+      variant: 'ghost',
+      title: 'Write the task manifest (.json) and the grouped link list (.txt) - both files, ready to send.',
+      disabled: task.memberIds.length === 0,
+      onClick: () => callbacks.onTaskExport(task.id),
+    }),
+  );
+  actions.appendChild(
+    h('button', {
+      class: 'psRowButton',
+      type: 'button',
+      text: '✕',
+      title: 'Remove this task. Its files stay in the list unless you clear them.',
+      ariaLabel: 'Remove this task',
+      onClick: () => callbacks.onTaskRemove(task.id),
+    }),
+  );
+  head.appendChild(actions);
+  element.appendChild(head);
+
+  if (card.expanded) {
+    const rows = h('div', { class: 'psQueue psLinkGroups psTaskFiles' });
+    for (const row of card.rows) rows.appendChild(linkRow(row, callbacks));
+    element.appendChild(rows);
+    if (card.hiddenRows > 0) {
+      element.appendChild(h('div', { class: 'psQueueMore', text: `${card.hiddenRows} more file(s) not drawn` }));
+    }
+  }
+
+  return element;
 }
 
-function selectedIds(state: LinksState): string[] {
-  return state.groups.flatMap((group) => group.rows.filter((row) => row.selected).map((row) => row.link.id));
+/** One line of run history: what the last pass did, and when. */
+function runLabel(run: TaskRun): string {
+  const when = relativeTime(run.startedAt);
+  const bits: string[] = [`last run ${when}`];
+  if (run.scannedPosts) bits.push(`${run.scannedPosts} post(s) scanned`);
+  if (run.added) bits.push(`${run.added} new file(s)`);
+  if (run.queued) bits.push(`${run.queued} queued`);
+  if (run.done || run.failed) bits.push(`${run.done} saved · ${run.failed} failed`);
+  if (!run.finishedAt) bits.push('still running');
+  return bits.join(' · ');
 }
 
-function summaryTile(value: number, label: string): HTMLElement {
-  return h('div', {}, h('strong', { text: String(Math.max(0, value)) }), h('span', { text: label }));
-}
+// ---------------------------------------------------------------------- rows
 
 function linkRow(row: MirrorLinkRow, callbacks: LinksCallbacks): HTMLElement {
   const { link } = row;
@@ -422,7 +524,7 @@ function linkRow(row: MirrorLinkRow, callbacks: LinksCallbacks): HTMLElement {
       type: 'checkbox',
       class: 'psRowCheck',
       checked: row.selected,
-      title: 'Include this link in the next "Add to download queue"',
+      title: 'Include this link in the selection',
       on: { change: () => callbacks.onToggleRow(link.id) },
     }),
   );
@@ -460,6 +562,21 @@ function linkRow(row: MirrorLinkRow, callbacks: LinksCallbacks): HTMLElement {
   if (link.bytes !== null) meta.appendChild(h('span', { class: 'psMuted psSmall', text: formatBytes(link.bytes) }));
   if (link.attempts > 0) meta.appendChild(h('span', { class: 'psMuted psSmall', text: `attempt ${link.attempts}` }));
   if (link.status !== 'new') meta.appendChild(h('span', { class: 'psMuted psSmall', text: relativeTime(link.updatedAt) }));
+  if (link.postUrl) {
+    meta.appendChild(
+      h('a', {
+        class: 'psMuted psSmall',
+        href: link.postUrl,
+        target: '_blank',
+        rel: 'noreferrer',
+        text: 'post',
+        onClick: (event) => {
+          event.preventDefault();
+          callbacks.onOpenPost(link.postUrl!);
+        },
+      }),
+    );
+  }
   if (row.serverLabel) meta.appendChild(h('span', { class: 'psMuted psSmall', text: row.serverLabel }));
   info.appendChild(meta);
 
@@ -486,6 +603,10 @@ function linkRow(row: MirrorLinkRow, callbacks: LinksCallbacks): HTMLElement {
   return element;
 }
 
+function summaryTile(value: number, label: string): HTMLElement {
+  return h('div', {}, h('strong', { text: String(Math.max(0, value)) }), h('span', { text: label }));
+}
+
 function shortenUrl(url: string, max: number): string {
   if (url.length <= max) return url;
   const head = url.slice(0, Math.floor(max / 2) - 1);
@@ -502,7 +623,7 @@ function shortenUrl(url: string, max: number): string {
 export function pickFile(onText: (text: string, filename: string) => void): void {
   const input = h('input', {
     type: 'file',
-    accept: '.txt,text/plain',
+    accept: '.txt,.json,text/plain,application/json',
     style: 'display:none',
   });
   input.addEventListener('change', () => {

@@ -499,7 +499,11 @@ async function walkTabs(registry) {
     if (paneId === 'pane-links') {
       const links = collectText(registry.get('links-host') ?? createElement());
       check('links pane renders the mirror-link card', /mirror links/i.test(links), links.slice(0, 200));
-      check('links pane offers import and export', /export \.txt/i.test(links) && /import \.txt/i.test(links), links.slice(0, 240));
+      check(
+        'links pane offers the package import and the text export',
+        /import package/i.test(links) && /export \.txt/i.test(links),
+        links.slice(0, 240),
+      );
       check('links pane counts the collected links', /collected/i.test(links), links.slice(0, 200));
     }
   }
@@ -524,6 +528,7 @@ async function driveLinks(registry) {
   await waitFor(() => (registry.get('links-host')?.children.length ?? 0) > 0, 4000);
 
   const card = () => registry.get('links-host') ?? createElement();
+  const text = () => collectText(card());
   const input = card().find((node) => node.tagName === 'INPUT' && node.id === 'psLinksQuery');
   if (!input) {
     check('links card offers a creator query box', false, 'no #psLinksQuery input');
@@ -540,23 +545,30 @@ async function driveLinks(registry) {
   collect.fire('click');
 
   // The crawl is rate limited (1.5 s per request for a creator archive), so one
-  // listing + one scanned post is what this waits for - then Stop is pressed and
-  // what was found has to survive.
-  // Real rows only: the header copy mentions the provider names, and a re-render
-  // replaces the elements, so the predicate looks at the ticked-row count.
-  const collected = () => {
-    const text = collectText(card());
-    const match = /Add to download queue \((\d+)\)/i.exec(text);
+  // listing + one scanned post is what this waits for: the task card appears with
+  // the files it found, then Stop is pressed and what was found has to survive.
+  const downloaded = () => {
+    const match = /Download missing \((\d+)\)/i.exec(text());
     return match ? Number(match[1]) : 0;
   };
-  const found = await waitFor(() => collected() > 0, 20000);
-  check('links tab collects the demo creator\'s mirror links', found, collectText(card()).slice(0, 240));
+  const found = await waitFor(() => downloaded() > 0, 20000);
+  check('links tab collects the demo creator into one task', found, text().slice(0, 260));
+  check(
+    'the task card names the creator and counts its files',
+    /1245946 · fanbox/.test(text()) && /\d+\/\d+ file\(s\) saved/i.test(text()),
+    text().slice(0, 260),
+  );
+  check('the task says how many files are still missing', downloaded() > 0, text().slice(0, 260));
   check(
     "links tab leaves the site's own storage alone",
-    !/https:\/\/n\d\.pawchive\.pw/i.test(collectText(card())),
-    collectText(card()).slice(0, 240),
+    !/https:\/\/n\d\.pawchive\.pw/i.test(text()),
+    text().slice(0, 260),
   );
-  check('links tab offers to queue what it found', collected() > 0, collectText(card()).slice(0, 240));
+  check(
+    'the task card offers the package actions',
+    /Rescan/i.test(text()) && /Export package/i.test(text()),
+    text().slice(0, 260),
+  );
 
   const stop = card().find((node) => node.tagName === 'BUTTON' && (node.textContent ?? '').trim() === 'Stop');
   stop?.fire('click');
@@ -564,17 +576,43 @@ async function driveLinks(registry) {
     () => (card().find((node) => node.tagName === 'BUTTON' && /Collect links/i.test(node.textContent ?? '')) ?? null) !== null,
     8000,
   );
-  check('links tab stops a crawl on demand', stopped, collectText(card()).slice(0, 240));
+  check('links tab stops a crawl on demand', stopped, text().slice(0, 240));
 
-  const rows = await previewSend?.({ type: 'links/list' });
-  check('the collected links are in durable storage', rows?.ok === true && rows.data.links.length > 0, JSON.stringify(rows?.ok ? rows.data.stats : rows?.error));
-
-  const exported = await previewSend?.({ type: 'links/export', payload: { grouping: 'post' } });
+  const tasks = await previewSend?.({ type: 'tasks/list' });
+  const first = tasks?.ok ? tasks.data.tasks[0] : null;
   check(
-    'the collected list exports as a re-importable file',
-    exported?.ok === true && exported.data.count > 0 && exported.data.text.includes('# Post:') && exported.data.filename.endsWith('.txt'),
-    JSON.stringify(exported?.ok ? { count: exported.data.count, filename: exported.data.filename } : exported?.error),
+    'the collected task is in durable storage',
+    !!first && first.task.memberIds.length > 0 && first.stats.total > 0,
+    JSON.stringify(tasks?.ok ? tasks.data.tasks.map((entry) => entry.task.name) : tasks?.error),
   );
+
+  // The package: both halves, exported and read back by a second "machine".
+  const exported = await previewSend?.({ type: 'tasks/export', payload: { taskId: first?.task.id } });
+  check(
+    'the task exports a package (manifest + link list)',
+    exported?.ok === true &&
+      exported.data.files.length === 2 &&
+      exported.data.files.some((file) => file.filename.endsWith('_task.json')) &&
+      exported.data.files.some((file) => file.filename.endsWith('_download_links.txt')),
+    JSON.stringify(exported?.ok ? exported.data.files.map((file) => file.filename) : exported?.error),
+  );
+
+  const manifest = exported?.ok ? exported.data.files.find((file) => file.filename.endsWith('_task.json')) : null;
+  const imported = manifest ? await previewSend?.({ type: 'tasks/import', payload: { text: manifest.text, filename: manifest.filename } }) : null;
+  check(
+    'the package reads back as a task, idle and with its files',
+    imported?.ok === true && imported.data.task.task.id === first?.task.id && imported.data.added === 0 && imported.data.updated > 0,
+    JSON.stringify(imported?.ok ? { id: imported.data.task.task.id, added: imported.data.added, updated: imported.data.updated } : imported?.error),
+  );
+
+  const run = await previewSend?.({ type: 'tasks/run', payload: { taskId: first?.task.id, start: false } });
+  check(
+    'Download missing queues exactly the files that are not saved yet',
+    run?.ok === true && run.data.queued === run.data.plan.total && run.data.plan.alreadyDone === 0,
+    JSON.stringify(run?.ok ? run.data.plan : run?.error),
+  );
+  const paused = await previewSend?.({ type: 'tasks/pause', payload: { taskId: first?.task.id } });
+  check('a task can be paused back to idle', paused?.ok === true && paused.data.task.stats.queued === 0, JSON.stringify(paused?.ok ? paused.data.task.stats : paused?.error));
 
   // Put the panel back on Browse, so the dock checks that follow still apply.
   tabs0(registry)?.fire('click');

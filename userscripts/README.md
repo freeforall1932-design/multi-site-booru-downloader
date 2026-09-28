@@ -44,7 +44,10 @@ The same job is built into Booru Server Manager's **Links** tab, where it:
 - keeps the collected links in `chrome.storage.local`, so they survive a reload;
 - can push the links it finds straight into the download queue, with the
   extension's concurrency and request-spacing controls;
-- imports a `.txt` back in (the same format it exports) to rebuild a queue.
+- imports a `.txt` back in (the same format it exports) to rebuild a queue;
+- imports a **task package** — a `.json` manifest plus the `.txt` — which comes
+  back as one task per creator with a file list, a completion summary and a run
+  history, so a list can be handed to someone else with the same extension.
 
 The userscript remains the zero-install option — it needs nothing but the site
 open in a browser that runs userscripts.

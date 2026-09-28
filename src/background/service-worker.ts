@@ -15,6 +15,7 @@ import { ChromeDownloader } from '../core/downloads.js';
 import type { UiRequest } from '../core/messages.js';
 import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
 import { MirrorLinkStore } from '../core/link-store.js';
+import { TaskStore } from '../core/task-store.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -39,7 +40,8 @@ const downloader = new ChromeDownloader();
 const history = new DownloadHistoryStore(area);
 const searches = new SearchHistoryStore(area);
 const links = new MirrorLinkStore(area);
-const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history, links });
+const tasks = new TaskStore(area);
+const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history, links, tasks });
 
 const handle = createRouter({
   client,
@@ -52,6 +54,7 @@ const handle = createRouter({
   history,
   searches,
   links,
+  tasks,
   environment: 'extension',
   version: VERSION,
 });

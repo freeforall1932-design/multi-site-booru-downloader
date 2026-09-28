@@ -309,6 +309,84 @@ export interface MirrorLinkStats {
   failed: number;
 }
 
+/**
+ * What a task's files add up to - the "complete / partial / failed" answer.
+ * `partial` is deliberately distinct from `failed`: a re-run should say
+ * "3 of 10 still missing" rather than "it broke".
+ */
+export type TaskCompletion = 'empty' | 'idle' | 'in-progress' | 'complete' | 'partial' | 'failed';
+
+/**
+ * One recorded pass over a task - the traceability the user asked for.
+ * A run is written when a task is started and updated as its rows settle, so
+ * "what did the last run do, and when" is always answerable.
+ */
+export interface TaskRun {
+  id: string;
+  startedAt: string;
+  finishedAt: string | null;
+  /** Posts the run looked at (a rescan only visits posts it has not seen). */
+  scannedPosts: number;
+  /** New files found by this run. */
+  added: number;
+  /** Rows handed to the download queue. */
+  queued: number;
+  done: number;
+  failed: number;
+  note: string | null;
+}
+
+/**
+ * A download task: one creator on one site, the files that belong to them.
+ *
+ * This is the extension's answer to a `.torrent` — a small, portable description
+ * of a job that a second person can open with the same extension and run. The
+ * files themselves are **not** stored here: a member is a mirror link id, and
+ * its state (`new`/`queued`/`done`/`failed`, saved name, error) lives in
+ * `bsm.links`. That is what keeps re-importing the same package, or collecting
+ * the same creator twice, idempotent.
+ */
+export interface DownloadTask {
+  /** `site:service:creator` (or `site:query`) - stable across exports/imports. */
+  id: string;
+  name: string;
+  siteType: SiteType | null;
+  serverId: string | null;
+  /** Archive service, e.g. `fanbox`, `patreon` - null for a plain URL list. */
+  service: string | null;
+  /** Creator id/name as the site spells it. */
+  creator: string | null;
+  /** The query the panel used (or would use) to re-list the creator. */
+  query: string;
+  createdAt: string;
+  updatedAt: string;
+  lastScanAt: string | null;
+  /** File ids, in discovery order. */
+  memberIds: string[];
+  /** Posts already scanned, so a rescan only visits what is new. */
+  scannedPosts: string[];
+  runs: TaskRun[];
+}
+
+export interface TaskStats {
+  total: number;
+  done: number;
+  failed: number;
+  queued: number;
+  /** Files not downloaded yet (new + queued). */
+  pending: number;
+  /** Bytes of the files that finished (null when none reported a size). */
+  bytes: number | null;
+}
+
+/** One task plus how its files are doing - what the Links tab renders. */
+export interface TaskView {
+  task: DownloadTask;
+  stats: TaskStats;
+  completion: TaskCompletion;
+  lastRun: TaskRun | null;
+}
+
 /** Section header written by `formatLinkExport` and read back by `parseLinkExport`. */
 export interface MirrorLinkSection {
   /** `post` sections carry the post URL/title, `provider` sections the host. */

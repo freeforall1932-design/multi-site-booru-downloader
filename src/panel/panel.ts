@@ -33,6 +33,7 @@ import type {
   RouteMatch,
   SearchResult,
   ServerConfigView,
+  TaskView,
   ValidationResult,
 } from '../shared/types.js';
 import { h } from '../ui/dom.js';
@@ -42,7 +43,8 @@ import {
   renderLinksCard,
   type LinkExportGrouping,
   type LinksState,
-  type MirrorLinkGroup,
+  type MirrorLinkRow,
+  type TaskCardView,
 } from '../ui/panel-links.js';
 import { postMatchesMedia, renderListingCard, type ListingState } from '../ui/panel-listing.js';
 import { renderPostCard, renderTabContext, type PostCardState, type TabContext } from '../ui/panel-context.js';
@@ -120,6 +122,13 @@ interface LinksRuntime {
   query: string;
   links: MirrorLink[];
   stats: MirrorLinkStats;
+  /** One entry per task (creator), newest first, as the worker knows them. */
+  tasks: TaskView[];
+  /** Task cards the user opened. */
+  expanded: Set<string>;
+  /** The task a collect run is currently filling (so scans join the right one). */
+  activeTaskId: string | null;
+  busyTaskId: string | null;
   selection: Set<string>;
   /** Rows seen at the last refresh, so nothing appears pre-ticked twice. */
   snapshot: Set<string>;
@@ -191,6 +200,10 @@ const state: PanelState = {
     query: '',
     links: [],
     stats: { total: 0, new: 0, queued: 0, done: 0, failed: 0 },
+    tasks: [],
+    expanded: new Set(),
+    activeTaskId: null,
+    busyTaskId: null,
     selection: new Set(),
     snapshot: new Set(),
     busy: false,
@@ -284,7 +297,18 @@ async function refreshLinks(): Promise<void> {
   if (!result) return;
   state.links.links = result.links;
   state.links.stats = result.stats;
+  await refreshTasks();
   reconcileLinksSelection();
+}
+
+/** The task list: one entry per creator, with its file statistics. */
+async function refreshTasks(): Promise<void> {
+  const result = await send<{ tasks: TaskView[] }>({ type: 'tasks/list' });
+  if (!result) return;
+  state.links.tasks = result.tasks;
+  const known = new Set(result.tasks.map((entry) => entry.task.id));
+  for (const id of [...state.links.expanded]) if (!known.has(id)) state.links.expanded.delete(id);
+  if (state.links.activeTaskId && !known.has(state.links.activeTaskId)) state.links.activeTaskId = null;
 }
 
 async function refreshHistory(): Promise<void> {
@@ -629,41 +653,36 @@ function buildLinksState(): LinksState {
   const server = currentLinksServer();
   const rowLimit = state.settings?.queueRowLimit ?? 60;
   const byServer = new Map(state.servers.map((entry) => [entry.id, entry.label]));
-  const groups: MirrorLinkGroup[] = [];
-  const index = new Map<string, MirrorLinkGroup>();
+  const rowFor = (link: MirrorLink): MirrorLinkRow => ({
+    link,
+    serverLabel: link.serverId ? byServer.get(link.serverId) ?? null : null,
+    selected: state.links.selection.has(link.id),
+  });
+  const byId = new Map(state.links.links.map((link) => [link.id, link]));
 
-  for (const link of state.links.links) {
-    const key = link.postUrl ?? `${link.siteType ?? 'link'}:${link.postId ?? link.host}`;
-    let group = index.get(key);
-    if (!group) {
-      group = {
-        key,
-        title: link.postTitle || link.postId || link.provider,
-        postUrl: link.postUrl,
-        rows: [],
-      };
-      index.set(key, group);
-      groups.push(group);
-    }
-    group.rows.push({
-      link,
-      serverLabel: link.serverId ? byServer.get(link.serverId) ?? null : null,
-      selected: state.links.selection.has(link.id),
+  let budget = rowLimit;
+  const tasks: TaskCardView[] = [];
+  const claimed = new Set<string>();
+  for (const view of state.links.tasks) {
+    const members = view.task.memberIds
+      .map((id) => byId.get(id))
+      .filter((link): link is MirrorLink => !!link);
+    for (const link of members) claimed.add(link.id);
+    const expanded = state.links.expanded.has(view.task.id);
+    const rows = expanded ? members.slice(0, Math.max(0, budget)) : [];
+    budget -= rows.length;
+    tasks.push({
+      view,
+      rows: expanded ? rows.map(rowFor) : [],
+      hiddenRows: expanded ? Math.max(0, members.length - rows.length) : 0,
+      expanded,
     });
   }
 
-  // Newest first, then keep the row budget: the newest scan is what the user is
-  // looking at, and older groups collapse into the "n more" footer.
-  groups.reverse();
-  const drawn: MirrorLinkGroup[] = [];
-  let budget = rowLimit;
-  for (const group of groups) {
-    if (budget <= 0) break;
-    const rows = group.rows.slice(0, budget);
-    budget -= rows.length;
-    drawn.push({ ...group, rows });
-  }
-  const drawnRows = drawn.reduce((total, group) => total + group.rows.length, 0);
+  // Everything a task does not own: bare imports, userscript exports, single links.
+  const unfiledAll = state.links.links.filter((link) => !claimed.has(link.id));
+  const unfiled = unfiledAll.slice(0, Math.max(0, budget)).map(rowFor);
+  budget -= unfiled.length;
 
   return {
     servers: state.servers,
@@ -674,9 +693,10 @@ function buildLinksState(): LinksState {
     progress: state.links.progress,
     error: state.links.error,
     stats: state.links.stats,
-    groups: drawn,
-    selectedCount: state.links.selection.size,
-    hiddenRows: Math.max(0, state.links.links.length - drawnRows),
+    tasks,
+    unfiled,
+    unfiledHidden: Math.max(0, unfiledAll.length - unfiled.length),
+    selectionCount: state.links.selection.size,
     exportGrouping: state.links.exportGrouping,
     filterMode: state.settings?.mirrorLinksFilter ?? 'downloads',
     queuePending: state.queue.items.filter((item) => item.kind === 'link' && item.status === 'pending').length,
@@ -722,7 +742,7 @@ function renderLinksTab(): void {
     },
     onAddToQueue: (ids) => void queueLinks(ids),
     onExport: (grouping) => void exportLinks(grouping),
-    onImport: (text, filename) => void importLinks(text, filename),
+    onImport: (text, filename) => void importTaskPackage(text, filename),
     onRemoveSelected: (ids) => void removeLinks(ids),
     onRemoveRow: (id) => void removeLinks([id]),
     onClear: (scope) => void clearLinks(scope),
@@ -730,6 +750,16 @@ function renderLinksTab(): void {
     onOpenPost: (url) => globalThis.open(url, '_blank', 'noreferrer'),
     onOpenQueue: () => switchTab('queue'),
     onOpenSettings: () => switchTab('settings'),
+    onToggleTask: (taskId) => {
+      if (state.links.expanded.has(taskId)) state.links.expanded.delete(taskId);
+      else state.links.expanded.add(taskId);
+      renderLinksTab();
+    },
+    onTaskStart: (taskId, mode) => void runTask(taskId, mode),
+    onTaskPause: (taskId) => void pauseTask(taskId),
+    onTaskRescan: (taskId) => void rescanTask(taskId),
+    onTaskExport: (taskId) => void exportTask(taskId),
+    onTaskRemove: (taskId) => void removeTask(taskId),
   });
   els.linksHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
 }
@@ -752,6 +782,24 @@ async function collectLinks(): Promise<void> {
   state.links.progress = { done: 0, total: 0, label: 'Reading the creator listing…' };
   state.crawlAborted = false;
   renderLinksTab();
+
+  // Every collect run belongs to a task (one per creator), so its files stay
+  // traceable: what was scanned, what came in, what still fails.
+  let taskId: string | null = state.links.activeTaskId;
+  try {
+    const begun = await send<{ task: TaskView; created: boolean }>({
+      type: 'tasks/begin',
+      payload: { serverId: server.id, query },
+    });
+    if (begun?.task) {
+      taskId = begun.task.task.id;
+      state.links.activeTaskId = taskId;
+      if (begun.created) state.links.expanded.add(taskId);
+    }
+  } catch {
+    // A task is bookkeeping, not a requirement: without it the scan still works.
+    taskId = null;
+  }
 
   const maxPosts = 1000;
   const pageLimit = Math.max(1, Math.ceil(maxPosts / 50));
@@ -785,7 +833,7 @@ async function collectLinks(): Promise<void> {
         if (state.crawlAborted) break;
         const result = await send<{ added: MirrorLink[]; duplicates: number; total: number }>({
           type: 'links/scanPost',
-          payload: { serverId: server.id, postId: post.id, postUrl: post.postUrl, postTitle: post.label, creator: query },
+          payload: { serverId: server.id, postId: post.id, postUrl: post.postUrl, postTitle: post.label, creator: query, taskId },
         });
         scanned += 1;
         if (!result) {
@@ -906,6 +954,147 @@ async function clearLinks(scope: 'all' | 'done' | 'pending'): Promise<void> {
   state.links.selection = new Set();
   await Promise.all([refreshLinks(), refreshQueue()]);
   if (result) toast(`${result.removed} link(s) cleared`, 'success');
+  render();
+}
+
+// ----------------------------------------------------------------- task actions
+
+/** Queue everything a task is missing (new files and retries) and start it. */
+async function runTask(taskId: string, mode: 'missing' | 'all'): Promise<void> {
+  state.links.busyTaskId = taskId;
+  renderLinksTab();
+  const result = await send<{
+    queued: number;
+    skipped: number;
+    started: boolean;
+    plan: { alreadyDone: number; alreadyQueued: number; retrying: number; total: number };
+  }>({ type: 'tasks/run', payload: { taskId, mode } });
+  state.links.busyTaskId = null;
+  if (!result) {
+    renderLinksTab();
+    return;
+  }
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  const parts = [`${result.queued} file(s) queued`];
+  if (result.plan.retrying) parts.push(`${result.plan.retrying} retry`);
+  if (result.plan.alreadyDone) parts.push(`${result.plan.alreadyDone} already saved, skipped`);
+  if (result.skipped) parts.push(`${result.skipped} already in the queue`);
+  state.dockNotice = {
+    text: `${parts.join(' · ')}.${result.started ? ' Downloading slowly in the background.' : ''}`,
+    tone: result.queued ? 'ok' : 'plain',
+  };
+  toast(result.queued ? `${result.queued} file(s) queued` : 'Nothing left to download', result.queued ? 'success' : 'info');
+  render();
+}
+
+/** Pause a task: its waiting rows leave the queue, files in flight are kept. */
+async function pauseTask(taskId: string): Promise<void> {
+  const result = await send<{ task: TaskView | null }>({ type: 'tasks/pause', payload: { taskId } });
+  if (!result) return;
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  state.dockNotice = { text: 'Task paused. Files already saved stay saved; Download missing resumes the rest.', tone: 'plain' };
+  render();
+}
+
+/** Look for posts the task has never scanned (new uploads) and attach their files. */
+async function rescanTask(taskId: string): Promise<void> {
+  state.links.busyTaskId = taskId;
+  renderLinksTab();
+  const result = await send<{ scannedPosts: number; added: number; failed: number; hasMore: boolean }>({
+    type: 'tasks/rescan',
+    payload: { taskId, maxPosts: 200 },
+  });
+  state.links.busyTaskId = null;
+  if (!result) {
+    renderLinksTab();
+    return;
+  }
+  await refreshLinks();
+  state.dockNotice = {
+    text: `${result.scannedPosts} new post(s) scanned · ${result.added} file(s) added${
+      result.failed ? ` · ${result.failed} post(s) unreadable` : ''
+    }${result.hasMore ? ' · more posts remain' : ''}. Press Download missing to fetch them.`,
+    tone: result.added ? 'ok' : 'plain',
+  };
+  toast(result.added ? `${result.added} new file(s) found` : 'No new posts found', result.added ? 'success' : 'info');
+  render();
+}
+
+/** Export the task's package: the manifest and the grouped list, both at once. */
+async function exportTask(taskId: string): Promise<void> {
+  const result = await send<{ files: Array<{ filename: string; text: string; mime: string }>; count: number }>({
+    type: 'tasks/export',
+    payload: { taskId },
+  });
+  if (!result?.files?.length) {
+    toast('Nothing to export yet — collect or import some files first.', 'warning');
+    return;
+  }
+  for (const file of result.files) {
+    const blob = new Blob([file.text], { type: `${file.mime};charset=utf-8` });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = file.filename;
+    anchor.click();
+    globalThis.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+  toast(`Package written (${result.count} file(s)): ${result.files.map((file) => file.filename).join(' + ')}`, 'success');
+  renderLinksTab();
+}
+
+async function removeTask(taskId: string): Promise<void> {
+  const task = state.links.tasks.find((entry) => entry.task.id === taskId)?.task ?? null;
+  const confirmed = globalThis.confirm(
+    `Remove the task "${task?.name ?? taskId}"?\n\nThe files stay in the collected list and anything already downloaded stays on disk.`,
+  );
+  if (!confirmed) return;
+  const result = await send<{ removed: boolean }>({ type: 'tasks/remove', payload: { taskId, keepFiles: true } });
+  state.links.expanded.delete(taskId);
+  if (state.links.activeTaskId === taskId) state.links.activeTaskId = null;
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  if (result?.removed) toast('Task removed', 'info');
+  render();
+}
+
+/**
+ * "Pick from file": read a package someone sent (or a plain list) and show it as
+ * a task.
+ *
+ * Nothing downloads here. The task arrives idle, and the user presses Download
+ * missing when they are ready - which is also where the "skip what I already
+ * have" rule lives, so re-importing the same file never re-downloads.
+ */
+async function importTaskPackage(text: string, filename: string): Promise<void> {
+  if (!text.trim()) {
+    toast(`“${filename}” was empty or could not be read.`, 'error');
+    return;
+  }
+  const result = await send<{
+    kind: 'json' | 'txt' | 'unknown';
+    created: boolean;
+    parsed: number;
+    added: number;
+    updated: number;
+    invalid: number;
+    task: TaskView | null;
+    error: string | null;
+  }>({ type: 'tasks/import', payload: { text, filename, serverId: state.links.serverId } });
+  if (!result) return;
+  if (result.error || !result.task) {
+    toast(result.error ?? 'That file could not be read.', 'error');
+    return;
+  }
+  if (result.task.task.id) state.links.expanded.add(result.task.task.id);
+  await Promise.all([refreshLinks(), refreshQueue()]);
+  const kind = result.kind === 'json' ? 'package' : 'link list';
+  state.dockNotice = {
+    text: `${result.task.task.name}: ${result.parsed} link(s) read from ${filename} (${kind}) · ${result.added} new${
+      result.updated ? `, ${result.updated} already known` : ''
+    }${result.invalid ? `, ${result.invalid} unreadable` : ''}. It is idle - press Download missing when you want it.`,
+    tone: result.added ? 'ok' : 'plain',
+  };
+  toast(`${result.task.task.name} imported — ${result.added} new file(s), ${result.updated} already known`, result.added ? 'success' : 'info');
   render();
 }
 

@@ -1253,3 +1253,71 @@ input[type='checkbox'] {
     align-items: flex-start;
   }
 }
+
+/* ------------------------------------------------------------------ tasks
+   A task is the package view inside the Links tab: one creator, its files, and
+   what the last pass did. Deliberately row-shaped like a queue item, so the same
+   information reads the same way in both places. */
+.psTaskList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2, 8px);
+  margin: var(--space-2, 8px) 0;
+}
+
+.psTask {
+  border: 1px solid var(--border, #2c3140);
+  border-left: 3px solid var(--accent, #7aa2f7);
+  border-radius: 8px;
+  padding: var(--space-2, 8px) var(--space-3, 12px);
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+
+.psTask-complete {
+  border-left-color: var(--ok, #46b17b);
+}
+.psTask-partial {
+  border-left-color: var(--warn, #d8a657);
+}
+.psTask-failed {
+  border-left-color: var(--danger, #f07178);
+}
+.psTask-in-progress {
+  border-left-color: var(--info, #7aa2f7);
+}
+
+.psTaskHead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.psTaskTitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.psTaskToggle {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.psTaskActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.psTaskFiles {
+  margin-top: var(--space-2, 8px);
+  border-top: 1px dashed var(--border, #2c3140);
+  padding-top: var(--space-2, 8px);
+}

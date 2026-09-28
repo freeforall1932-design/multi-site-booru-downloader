@@ -13,6 +13,7 @@ import { historyKey, type DownloadHistoryStore } from './history.js';
 import { createId, deepClone, isValidHttpUrl } from '../shared/util.js';
 import { mirrorLinkId } from './links.js';
 import type { MirrorLinkStore } from './link-store.js';
+import type { TaskStore } from './task-store.js';
 import type { BooruClient } from './client.js';
 import type { Downloader } from './downloads.js';
 import { buildDownloadPath, buildMirrorPath } from './naming.js';
@@ -31,6 +32,8 @@ export interface QueueDeps {
   history?: DownloadHistoryStore;
   /** Optional mirror-link list: keeps a link row's own status in sync. */
   links?: MirrorLinkStore;
+  /** Optional task list: closes a task's run record once its files settle. */
+  tasks?: TaskStore;
   http?: HttpClient;
   /** Explicit per-server rate spacing override (defaults to adapter + settings). */
   spacingMs?: number;
@@ -396,6 +399,12 @@ export class DownloadQueue {
         error: patch.error ?? null,
         ...(patch.attempts !== undefined ? { attempts: patch.attempts } : {}),
       });
+      // A task owns a set of links; when the last of them stops waiting, the
+      // task's newest run is closed so "how did that pass go?" is answerable.
+      if (this.deps.tasks) {
+        const links = await this.deps.links.list();
+        await this.deps.tasks.noteLinkSettled(item.postId, links);
+      }
     } catch {
       /* non-fatal: the file (or the failure) is already real either way */
     }

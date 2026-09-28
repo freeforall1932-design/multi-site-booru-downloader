@@ -15,6 +15,7 @@ import { BooruClient } from '../core/client.js';
 import type { UiRequest } from '../core/messages.js';
 import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
 import { MirrorLinkStore } from '../core/link-store.js';
+import { TaskStore } from '../core/task-store.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -124,7 +125,8 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
   const history = new DownloadHistoryStore(storage);
   const searches = new SearchHistoryStore(storage);
   const links = new MirrorLinkStore(storage);
-  const queue = new DownloadQueue({ storage, client, servers, settings, downloader, history, links });
+  const tasks = new TaskStore(storage);
+  const queue = new DownloadQueue({ storage, client, servers, settings, downloader, history, links, tasks });
 
   const router = createRouter({
     client,
@@ -136,6 +138,7 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
     history,
     searches,
     links,
+    tasks,
     // The preview keeps no chrome APIs, so UA rewriting is reported as a no-op.
     environment: 'preview',
     version: '0.1.0-preview',
