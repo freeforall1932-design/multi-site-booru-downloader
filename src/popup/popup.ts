@@ -352,6 +352,12 @@ async function boot(): Promise<void> {
   }
 
   document.getElementById('open-options')?.addEventListener('click', () => platform.openOptions('servers'));
+  document.getElementById('open-panel')?.addEventListener('click', () => {
+    void platform.openPanel().then((opened) => {
+      if (opened) globalThis.close();
+      else platform.openOptions('settings');
+    });
+  });
   render();
   if (state.route?.kind === 'post') void loadPostForRoute();
 }

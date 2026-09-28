@@ -1,0 +1,1349 @@
+/**
+ * Side panel controller.
+ *
+ * This is the daily-driver surface of the extension and follows the layout of the
+ * sister side-panel downloaders (X Media Downloader / Rule 34 Downloader):
+ *
+ *   header  - product eyebrow, title, live status pill
+ *   tabs    - Browse · Queue · Servers · Settings
+ *   cards   - active-tab context, "this post", fetch card, list of rows
+ *   dock    - fixed footer: concurrency, quality, Download selected, Pause/Stop
+ *
+ * The panel never talks to a booru, never sees a stored secret and never touches
+ * the filesystem: it renders masked views from `servers/list` and sends
+ * `UiRequest`s through the platform façade. In the preview harness the same
+ * façade is backed by the offline mock booru, so the identical code path is
+ * exercised without any network traffic.
+ */
+import type { AdapterCatalogEntry, DiagnosticsInfo, UiRequest } from '../core/messages.js';
+import { fromToRange, parsePageRange } from '../core/pages.js';
+import { composeSearchTags } from '../core/search.js';
+import { getAdapter } from '../core/registry.js';
+import { getPlatform, isExtensionEnvironment } from '../platform/index.js';
+import type {
+  BooruPost,
+  DownloadHistoryEntry,
+  ExtensionSettings,
+  MediaFilter,
+  PanelTab,
+  QueueItem,
+  QueueSummary,
+  RouteMatch,
+  SearchResult,
+  ServerConfigView,
+  ValidationResult,
+} from '../shared/types.js';
+import { h } from '../ui/dom.js';
+import { renderDiagnostics, copyDiagnostics } from '../ui/diagnostics-view.js';
+import { postMatchesMedia, renderListingCard, type ListingState } from '../ui/panel-listing.js';
+import { renderPostCard, renderTabContext, type PostCardState, type TabContext } from '../ui/panel-context.js';
+import { renderDock, renderQueueList, type DockState, type QueueListState, type QueueRowView } from '../ui/panel-queue.js';
+import { draftForSiteType, draftFromServer, renderServerForm, type ServerFormDraft } from '../ui/server-form.js';
+import { renderServerList } from '../ui/server-list.js';
+import { renderSettingsSections } from '../ui/settings-sections.js';
+import { showError, toast } from '../ui/toast.js';
+
+// ------------------------------------------------------------------ elements
+const els = {
+  tabs: document.getElementById('panel-tabs') as HTMLElement,
+  statusPill: document.getElementById('engine-status') as HTMLElement,
+  eyebrow: document.getElementById('panel-eyebrow') as HTMLElement,
+  title: document.getElementById('panel-title') as HTMLElement,
+  contextHost: document.getElementById('context-host') as HTMLElement,
+  browsePane: document.getElementById('pane-browse') as HTMLElement,
+  queuePane: document.getElementById('pane-queue') as HTMLElement,
+  serversPane: document.getElementById('pane-servers') as HTMLElement,
+  settingsPane: document.getElementById('pane-settings') as HTMLElement,
+  listingHost: document.getElementById('listing-host') as HTMLElement,
+  browseListHost: document.getElementById('browse-list-host') as HTMLElement,
+  queueHost: document.getElementById('queue-host') as HTMLElement,
+  serversHost: document.getElementById('servers-host') as HTMLElement,
+  settingsHost: document.getElementById('settings-host') as HTMLElement,
+  dock: document.getElementById('dock') as HTMLElement,
+  dockHost: document.getElementById('dock-host') as HTMLElement,
+  previewBanner: document.getElementById('preview-banner') as HTMLElement,
+};
+
+const platform = getPlatform();
+const TABS: Array<{ id: PanelTab; label: string }> = [
+  { id: 'browse', label: 'Browse' },
+  { id: 'queue', label: 'Queue' },
+  { id: 'servers', label: 'Servers' },
+  { id: 'settings', label: 'Settings' },
+];
+
+interface ListingRuntime {
+  serverId: string | null;
+  tags: string;
+  advanced: boolean;
+  fromPage: string;
+  toPage: string;
+  rangeText: string;
+  media: MediaFilter;
+  skipDownloaded: boolean;
+  ratingOverride: boolean | null;
+  suggestions: string[];
+  lastResult: SearchResult | null;
+  matched: number | null;
+  busy: 'idle' | 'search' | 'crawl';
+  progress: { done: number; total: number; label: string } | null;
+  error: { message: string; kind: string; hint: string | null } | null;
+  skippedDownloaded: number;
+}
+
+interface EditorRuntime {
+  draft: ServerFormDraft;
+  isNew: boolean;
+  apiKeyMask: string;
+  validation: ValidationResult | null;
+  validating: boolean;
+  saving: boolean;
+}
+
+interface PanelState {
+  tab: PanelTab;
+  servers: ServerConfigView[];
+  adapters: AdapterCatalogEntry[];
+  settings: ExtensionSettings | null;
+  savingSettings: boolean;
+  context: TabContext;
+  post: PostCardState;
+  listing: ListingRuntime;
+  queue: { summary: QueueSummary; items: QueueItem[]; maxConcurrency: number; busy: boolean };
+  selection: Set<string>;
+  /** Pending rows seen at the last refresh, so new rows appear ticked. */
+  pendingSnapshot: Set<string>;
+  history: Map<string, DownloadHistoryEntry>;
+  historyCount: number;
+  searchCount: number;
+  thumbnails: Map<string, string>;
+  editor: EditorRuntime | null;
+  diagnostics: DiagnosticsInfo | null;
+  hostAccess: { origin: string; granted: boolean } | null;
+  dockNotice: { text: string; tone: 'plain' | 'ok' | 'error' } | null;
+  busyId: string | null;
+  crawlAborted: boolean;
+}
+
+function emptySummary(): QueueSummary {
+  return { pending: 0, running: 0, done: 0, failed: 0, skipped: 0, canceled: 0, total: 0, paused: false, active: false };
+}
+
+const state: PanelState = {
+  tab: 'browse',
+  servers: [],
+  adapters: [],
+  settings: null,
+  savingSettings: false,
+  context: { checking: true, url: null, route: null, server: null, missingProfile: false, differentProfile: null },
+  post: { loading: false, post: null, error: null, queued: false, saved: null, busy: false, blocked: false },
+  listing: {
+    serverId: null,
+    tags: '',
+    advanced: false,
+    fromPage: '1',
+    toPage: '',
+    rangeText: '1',
+    media: 'all',
+    skipDownloaded: true,
+    ratingOverride: null,
+    suggestions: [],
+    lastResult: null,
+    matched: null,
+    busy: 'idle',
+    progress: null,
+    error: null,
+    skippedDownloaded: 0,
+  },
+  queue: { summary: emptySummary(), items: [], maxConcurrency: 2, busy: false },
+  selection: new Set(),
+  pendingSnapshot: new Set(),
+  history: new Map(),
+  historyCount: 0,
+  searchCount: 0,
+  thumbnails: new Map(),
+  editor: null,
+  diagnostics: null,
+  hostAccess: null,
+  dockNotice: null,
+  busyId: null,
+  crawlAborted: false,
+};
+
+// ------------------------------------------------------------------ messaging
+
+async function send<T>(request: UiRequest): Promise<T | null> {
+  const response = await platform.send(request);
+  if (!response.ok) {
+    showError(response.error);
+    return null;
+  }
+  return response.data as T;
+}
+
+// ----------------------------------------------------------------------- boot
+
+async function boot(): Promise<void> {
+  if (!isExtensionEnvironment()) {
+    // The preview harness serves this page in a normal tab, so the mock service
+    // graph has to be installed before the first request goes out.
+    const preview = await import('../preview/preview.js');
+    await preview.startPreview();
+    els.previewBanner.hidden = false;
+  }
+
+  await Promise.all([refreshSettings(), refreshServers(), refreshQueue(), refreshHistory()]);
+  state.listing.media = state.settings?.mediaFilter ?? 'all';
+  state.listing.skipDownloaded = state.settings?.skipDownloaded ?? true;
+  state.tab = hashTab() ?? state.settings?.panelDefaultTab ?? 'browse';
+  applyTheme(state.settings?.theme ?? 'system');
+  render();
+  void refreshContext();
+  void refreshDiagnostics();
+  startPolling();
+}
+
+function applyTheme(theme: ExtensionSettings['theme']): void {
+  const lightPreferred = globalThis.matchMedia?.('(prefers-color-scheme: light)').matches ?? false;
+  document.documentElement.dataset.theme = theme === 'light' || (theme === 'system' && lightPreferred) ? 'light' : 'dark';
+}
+
+// ------------------------------------------------------------------- refreshes
+
+async function refreshSettings(): Promise<void> {
+  const settings = await send<ExtensionSettings>({ type: 'settings/get' });
+  if (settings) state.settings = settings;
+}
+
+async function refreshServers(): Promise<void> {
+  const servers = await send<ServerConfigView[]>({ type: 'servers/list' });
+  if (!servers) return;
+  state.servers = servers;
+  if (!state.listing.serverId || !servers.some((entry) => entry.id === state.listing.serverId)) {
+    state.listing.serverId = servers.find((entry) => entry.isDefault)?.id ?? servers[0]?.id ?? null;
+  }
+  state.hostAccess = servers.length
+    ? { origin: new URL(servers[0]!.baseUrl).origin, granted: await platform.permissions.contains(new URL(servers[0]!.baseUrl).origin) }
+    : null;
+  await refreshSuggestions();
+}
+
+async function refreshQueue(): Promise<void> {
+  const result = await send<{ summary: QueueSummary; items: QueueItem[]; maxConcurrency: number }>({ type: 'queue/list' });
+  if (!result) return;
+  state.queue = { summary: result.summary, items: result.items, maxConcurrency: result.maxConcurrency, busy: state.queue.busy };
+  reconcileSelection();
+}
+
+async function refreshHistory(): Promise<void> {
+  const result = await send<{ entries: DownloadHistoryEntry[]; total: number }>({ type: 'history/list' });
+  if (!result) return;
+  state.historyCount = result.total;
+  state.history = new Map(result.entries.map((entry) => [entry.key, entry]));
+}
+
+async function refreshSuggestions(): Promise<void> {
+  if (!state.settings?.searchHistoryEnabled) {
+    state.listing.suggestions = [];
+    return;
+  }
+  const result = await send<{ entries: Array<{ query: string }> }>({
+    type: 'searches/list',
+    payload: { serverId: state.listing.serverId },
+  });
+  if (result) {
+    state.listing.suggestions = result.entries.map((entry) => entry.query);
+    state.searchCount = result.entries.length;
+  }
+}
+
+async function refreshDiagnostics(): Promise<void> {
+  const info = await send<DiagnosticsInfo>({ type: 'diagnostics/info' });
+  if (!info) return;
+  state.diagnostics = info;
+  state.adapters = info.adapters;
+}
+
+/** Read the active tab, resolve it against the saved servers, render the cards. */
+async function refreshContext(): Promise<void> {
+  state.context = { ...state.context, checking: true };
+  renderContext();
+  const url = await platform.activeTabUrl();
+  if (!url) {
+    state.context = { checking: false, url: null, route: null, server: null, missingProfile: false, differentProfile: null };
+    renderContext();
+    return;
+  }
+  const route = await send<RouteMatch & { server: ServerConfigView | null }>({ type: 'routes/detect', payload: { url } });
+  const server = route?.server ?? null;
+  state.context = {
+    checking: false,
+    url,
+    route: route ?? null,
+    server,
+    missingProfile: Boolean(route) && !server,
+    differentProfile: null,
+  };
+  if (server) state.listing.serverId = server.id;
+  render();
+
+  if (route?.kind === 'post' && route.postId && server) {
+    await loadPost(server.id, route.postId);
+  } else {
+    state.post = { loading: false, post: null, error: null, queued: false, saved: null, busy: false, blocked: false };
+    if (route && route.kind !== 'post' && route.tags && !state.listing.tags) {
+      state.listing.tags = route.tags;
+    }
+    render();
+  }
+  await refreshSuggestions();
+  if (state.tab === 'browse') renderBrowse();
+}
+
+async function loadPost(serverId: string, postId: string): Promise<void> {
+  state.post = { loading: true, post: null, error: null, queued: false, saved: null, busy: false, blocked: false };
+  renderContext();
+  const post = await send<BooruPost>({ type: 'posts/get', payload: { serverId, postId } });
+  if (!post) {
+    state.post = {
+      loading: false,
+      post: null,
+      error: {
+        message: 'The post could not be read from the site.',
+        kind: 'parse-failure',
+        hint: 'Check the server profile, then press ⟳ to try again.',
+      },
+      queued: false,
+      saved: null,
+      busy: false,
+      blocked: false,
+    };
+    renderContext();
+    return;
+  }
+  const historyEntry = state.history.get(`${post.serverId}:${post.id}`) ?? null;
+  const server = state.servers.find((entry) => entry.id === post.serverId) ?? null;
+  const blocked = Boolean(server && state.settings?.enforceRatingFilterOnDownload && !ratingAllowed(server, post.rating));
+  state.thumbnails.set(post.id, post.previewUrl);
+  state.post = {
+    loading: false,
+    post,
+    error: null,
+    queued: queueHasPost(post.serverId, post.id),
+    saved: historyEntry ? { filename: historyEntry.filename, at: historyEntry.at } : null,
+    busy: false,
+    blocked,
+  };
+  render();
+}
+
+function queueHasPost(serverId: string, postId: string): boolean {
+  return state.queue.items.some(
+    (item) => item.serverId === serverId && item.postId === postId && (item.status === 'pending' || item.status === 'running'),
+  );
+}
+
+/** Client-side mirror of the shared rating decision - used for the warning only. */
+function ratingAllowed(server: ServerConfigView, rating: string): boolean {
+  if (!server.ratingFilterEnabled) return true;
+  const allowed = server.allowedRatings?.length ? server.allowedRatings : ['general', 'safe', 'sensitive'];
+  return allowed.includes(rating as never);
+}
+
+// -------------------------------------------------------------------- render
+
+function render(): void {
+  renderShell();
+  els.browsePane.hidden = state.tab !== 'browse';
+  els.queuePane.hidden = state.tab !== 'queue';
+  els.serversPane.hidden = state.tab !== 'servers';
+  els.settingsPane.hidden = state.tab !== 'settings';
+  els.dock.hidden = state.tab !== 'browse' && state.tab !== 'queue';
+  renderContext();
+  if (state.tab === 'browse') renderBrowse();
+  if (state.tab === 'queue') renderQueueTab();
+  if (state.tab === 'servers') renderServersTab();
+  if (state.tab === 'settings') renderSettingsTab();
+  renderDockBar();
+}
+
+function renderShell(): void {
+  els.eyebrow.textContent = 'BOORU SERVER MANAGER';
+  els.title.textContent = 'Download panel';
+  els.statusPill.className = `status-pill ${pillTone()}`;
+  els.statusPill.textContent = statusPillText();
+  const active = state.servers.find((entry) => entry.id === state.listing.serverId) ?? null;
+  els.tabs.replaceChildren();
+  for (const tab of TABS) {
+    const element = h('button', {
+      type: 'button',
+      class: `panelTab${state.tab === tab.id ? ' active' : ''}`,
+      text: tab.label,
+      dataset: { tab: tab.id },
+      onClick: () => switchTab(tab.id),
+    });
+    if (tab.id === 'queue') {
+      const pending = state.queue.summary.pending + state.queue.summary.running;
+      if (pending) element.appendChild(h('span', { class: 'panelTabBadge', text: String(pending) }));
+    }
+    els.tabs.appendChild(element);
+  }
+  els.title.title = active ? `Searching with ${active.label}` : 'No server selected';
+}
+
+function switchTab(tab: PanelTab): void {
+  if (state.tab === tab) return;
+  state.tab = tab;
+  // Deep links (#queue, #settings) and reload-friendly URLs.
+  if (globalThis.location.hash.replace('#', '') !== tab) globalThis.location.hash = tab;
+  render();
+}
+
+/** Tab named in the URL hash, when it is one of the known tabs. */
+function hashTab(): PanelTab | null {
+  const hash = globalThis.location.hash.replace(/^#/, '');
+  return TABS.some((tab) => tab.id === hash) ? (hash as PanelTab) : null;
+}
+
+function pillTone(): string {
+  if (state.queue.summary.running || state.queue.summary.active) return 'running';
+  if (state.listing.busy === 'crawl') return 'crawling';
+  if (state.listing.busy === 'search') return 'crawling';
+  if (state.queue.summary.failed) return 'warn';
+  if (!state.settings) return 'idle';
+  return 'idle';
+}
+
+function statusPillText(): string {
+  if (!state.settings) return 'Loading…';
+  if (state.queue.summary.running) return `${state.queue.summary.running} downloading`;
+  if (state.listing.busy === 'crawl') return 'fetching';
+  if (state.listing.busy === 'search') return 'listing';
+  if (state.queue.summary.failed) return `${state.queue.summary.failed} failed`;
+  if (state.queue.summary.pending) return `${state.queue.summary.pending} queued`;
+  return 'Ready';
+}
+
+function renderContext(): void {
+  if (state.tab !== 'browse') return;
+  const host = h('div');
+  renderTabContext(host, state.context, {
+    onRefresh: () => void refreshContext(),
+    onAddServer: () => openEditor(null, state.context.route?.siteType ?? 'e621', state.context.route?.canonicalUrl),
+    onUseRoute: () => {
+      const route = state.context.route;
+      if (!route?.tags) return;
+      state.listing.tags = route.tags;
+      toast(`Search box filled with “${route.tags}”`, 'info');
+      renderBrowse();
+    },
+  });
+  const children: HTMLElement[] = [];
+  for (const child of Array.from(host.children)) children.push(child as HTMLElement);
+
+  if (state.context.route?.kind === 'post' && (state.post.loading || state.post.post || state.post.error)) {
+    const postHost = h('div');
+    renderPostCard(postHost, state.post, {
+      onDownload: () => void downloadPost(),
+      onAddToList: () => void addPostToList(),
+      onReload: () => {
+        const route = state.context.route;
+        if (route?.postId && state.context.server) void loadPost(state.context.server.id, route.postId);
+      },
+    });
+    for (const child of Array.from(postHost.children)) children.push(child as HTMLElement);
+  }
+  els.contextHost.replaceChildren(...children);
+}
+
+// --------------------------------------------------------------------- browse
+
+function renderBrowse(): void {
+  const host = h('div');
+  renderListingCard(host, buildListingState(), {
+    onServerChange: (serverId) => {
+      state.listing.serverId = serverId;
+      state.listing.ratingOverride = null;
+      state.listing.error = null;
+      void refreshSuggestions().then(() => renderBrowse());
+    },
+    onTagsChange: (tags) => {
+      state.listing.tags = tags;
+      renderBrowse();
+    },
+    onSuggestion: (query) => {
+      state.listing.tags = query;
+      renderBrowse();
+    },
+    onClearSuggestions: () => {
+      void send({ type: 'searches/clear', payload: { serverId: state.listing.serverId } })
+        .then(() => refreshSuggestions())
+        .then(() => renderBrowse());
+    },
+    onAdvancedToggle: (advanced) => {
+      if (advanced) {
+        state.listing.rangeText = fromToRange(state.listing.fromPage, state.listing.toPage) || '1';
+      } else {
+        const parsed = parsePageRange(state.listing.rangeText, { maxPages: pageLimit() });
+        if (parsed.ok && parsed.selection.kind === 'list' && parsed.selection.pages.length) {
+          state.listing.fromPage = String(parsed.selection.pages[0]);
+          state.listing.toPage = String(parsed.selection.pages[parsed.selection.pages.length - 1]);
+        }
+      }
+      state.listing.advanced = advanced;
+      renderBrowse();
+    },
+    onFromToChange: (from, to) => {
+      state.listing.fromPage = from;
+      state.listing.toPage = to;
+      state.listing.rangeText = fromToRange(from, to) || '1';
+      renderBrowse();
+    },
+    onRangeTextChange: (text) => {
+      state.listing.rangeText = text;
+      renderBrowse();
+    },
+    onMediaChange: (media) => {
+      state.listing.media = media;
+      renderBrowse();
+      renderDockBar();
+    },
+    onSkipDownloadedChange: (value) => {
+      state.listing.skipDownloaded = value;
+      renderBrowse();
+    },
+    onToggleRatingFilter: () => {
+      const server = currentServer();
+      const effective = state.listing.ratingOverride ?? server?.ratingFilterEnabled ?? false;
+      state.listing.ratingOverride = !effective;
+      renderBrowse();
+    },
+    onList: () => void runFetch({ mode: 'page' }),
+    onFetchRange: () => void runFetch({ mode: 'range' }),
+    onDownloadPage: () => void runFetch({ mode: 'page', download: true }),
+    onStop: () => {
+      state.crawlAborted = true;
+      state.listing.busy = 'idle';
+      state.listing.progress = null;
+      state.dockNotice = { text: 'Fetch stopped. Rows already listed stay in the list.', tone: 'plain' };
+      render();
+    },
+    onOpenServers: () => switchTab('servers'),
+  });
+  els.listingHost.replaceChildren(...Array.from(host.children) as HTMLElement[]);
+
+  const listHost = h('div');
+  renderQueueList(listHost, buildQueueListState(), listCallbacks());
+  els.browseListHost.replaceChildren(...(Array.from(listHost.children) as HTMLElement[]));
+}
+
+function renderQueueTab(): void {
+  const host = h('div');
+  renderQueueList(host, buildQueueListState(), listCallbacks());
+  els.queueHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
+}
+
+function currentServer(): ServerConfigView | null {
+  return state.servers.find((entry) => entry.id === state.listing.serverId) ?? null;
+}
+
+function pageLimit(): number {
+  return state.settings?.pageRangeLimit ?? 150;
+}
+
+function currentRange() {
+  if (state.listing.advanced) return parsePageRange(state.listing.rangeText, { maxPages: pageLimit() });
+  return parsePageRange(fromToRange(state.listing.fromPage, state.listing.toPage) || '1', { maxPages: pageLimit() });
+}
+
+function buildListingState(): ListingState {
+  const server = currentServer();
+  const adapter = state.adapters.find((entry) => entry.siteType === server?.siteType) ?? null;
+  const parsed = currentRange();
+  const composed = composeSearchTags({
+    tags: state.listing.tags,
+    blacklist: state.settings?.tagBlacklist ?? '',
+    globalSuffix: state.settings?.globalTagSuffix ?? '',
+  });
+  return {
+    servers: state.servers,
+    adapters: state.adapters,
+    serverId: state.listing.serverId,
+    tags: state.listing.tags,
+    suggestions: state.listing.suggestions,
+    advanced: state.listing.advanced,
+    fromPage: state.listing.fromPage,
+    toPage: state.listing.toPage,
+    rangeText: state.listing.rangeText,
+    rangeLabel: parsed.ok ? `Will fetch ${parsed.label}` : null,
+    rangeError: parsed.ok ? null : parsed.message,
+    media: state.listing.media,
+    skipDownloaded: state.listing.skipDownloaded,
+    ratingEnabled: state.listing.ratingOverride ?? server?.ratingFilterEnabled ?? false,
+    allowedRatings: server?.allowedRatings ?? [],
+    supportsRatingFilter: adapter?.supportsRatingFilter ?? false,
+    filters: { appended: composed.appended, excluded: composed.excluded },
+    pageLimit: pageLimit(),
+    busy: state.listing.busy,
+    progress: state.listing.progress,
+    error: state.listing.error,
+    listedCount: state.queue.items.length,
+    matchedCount: state.listing.matched,
+    skippedDownloaded: state.listing.skippedDownloaded,
+  };
+}
+
+function isVideoItem(item: QueueItem): boolean {
+  const post = state.post.post;
+  if (post && post.id === item.postId) return post.isVideo;
+  return /\.(mp4|webm|mov|mkv)$/i.test(item.filename ?? '');
+}
+
+function mediaMatchesItem(item: QueueItem): boolean {
+  if (state.listing.media === 'all') return true;
+  return state.listing.media === 'video' ? isVideoItem(item) : !isVideoItem(item);
+}
+
+function buildQueueListState(): QueueListState {
+  const items = state.queue.items.filter((item) => mediaMatchesItem(item));
+  const limit = state.settings?.queueRowLimit ?? 60;
+  const rows: QueueRowView[] = items.slice(0, limit).map((item) => {
+    const historyEntry = state.history.get(`${item.serverId}:${item.postId}`) ?? null;
+    return {
+      item,
+      server: state.servers.find((entry) => entry.id === item.serverId) ?? null,
+      selected: state.selection.has(item.id),
+      savedFilename: historyEntry?.filename ?? null,
+      thumbnail: state.settings?.showThumbnails === false ? '' : state.thumbnails.get(item.postId) ?? '',
+      media: isVideoItem(item) ? 'video' : 'image',
+      rating: item.rating ?? null,
+    };
+  });
+  return {
+    summary: state.queue.summary,
+    rows,
+    hiddenRows: Math.max(0, items.length - rows.length),
+    filteredRows: Math.max(0, state.queue.items.length - items.length),
+    showThumbnails: state.settings?.showThumbnails !== false,
+    busy: state.queue.busy,
+  };
+}
+
+function listCallbacks() {
+  return {
+    onToggleRow: (itemId: string) => {
+      if (state.selection.has(itemId)) state.selection.delete(itemId);
+      else state.selection.add(itemId);
+      render();
+    },
+    onSelectAll: (select: boolean) => {
+      state.selection = select ? new Set(selectableItems().map((item) => item.id)) : new Set();
+      render();
+    },
+    onInvert: () => {
+      const next = new Set<string>();
+      for (const item of selectableItems()) if (!state.selection.has(item.id)) next.add(item.id);
+      state.selection = next;
+      render();
+    },
+    onRemoveSelected: () => void removeItems([...state.selection]),
+    onRemoveRow: (itemId: string) => void removeItems([itemId]),
+    onCancelRow: (itemId: string) => void cancelItem(itemId),
+    onRetryFailed: () => void retryFailed(),
+    onClearFinished: () => void clearQueue('completed'),
+    onResetHistory: () => void resetHistory(),
+    onClearList: () => void clearQueue('all'),
+    onOpenPost: (item: QueueItem) => {
+      if (item.postUrl) globalThis.open(item.postUrl, '_blank', 'noreferrer');
+    },
+  };
+}
+
+function selectableItems(): QueueItem[] {
+  return state.queue.items.filter((item) => item.status === 'pending' && mediaMatchesItem(item));
+}
+
+/**
+ * Tick marks: every newly listed pending row starts ticked (the sister panels do
+ * the same), and a row the user unticked stays unticked across refreshes.
+ */
+function reconcileSelection(): void {
+  const pending = new Set(state.queue.items.filter((item) => item.status === 'pending').map((item) => item.id));
+  const next = new Set<string>();
+  for (const id of state.selection) if (pending.has(id)) next.add(id);
+  for (const id of pending) if (!state.pendingSnapshot.has(id)) next.add(id);
+  state.selection = next;
+  state.pendingSnapshot = pending;
+}
+
+// ----------------------------------------------------------------------- dock
+
+function renderDockBar(): void {
+  const selected = [...state.selection].filter((id) => state.queue.items.some((item) => item.id === id && item.status === 'pending'));
+  const dockState: DockState = {
+    concurrency: state.settings?.maxConcurrency ?? 2,
+    filePreference: state.settings?.filePreference ?? 'original',
+    selectedCount: selected.length,
+    pendingCount: state.queue.summary.pending,
+    running: state.queue.summary.running > 0 || state.queue.summary.active,
+    paused: state.queue.summary.paused,
+    notice: state.dockNotice,
+    busy: state.queue.busy,
+  };
+  renderDock(els.dockHost, dockState, {
+    onConcurrencyChange: (value) => void patchSettings({ maxConcurrency: value }),
+    onFilePreferenceChange: (value) => void patchSettings({ filePreference: value }),
+    onDownloadSelected: () => void downloadSelected(),
+    onStart: () => void startQueue(),
+    onPause: () => void pauseQueue(true),
+    onResume: () => void pauseQueue(false),
+    onStop: () => void stopQueue(),
+  });
+}
+
+// ------------------------------------------------------------------- fetching
+
+/**
+ * Fetch posts and turn them into list rows.
+ *
+ * `mode: 'page'` lists one page; `mode: 'range'` walks the selected pages. Nothing
+ * is downloaded unless `download` is set - the promise printed in the card
+ * ("Fetching only adds rows to the list") is kept.
+ */
+async function runFetch(options: { mode: 'page' | 'range'; download?: boolean }): Promise<void> {
+  const server = currentServer();
+  if (!server) {
+    toast('Add a server first', 'error');
+    switchTab('servers');
+    return;
+  }
+  const range = currentRange();
+  if (!range.ok) {
+    state.listing.error = { message: range.message, kind: 'incomplete-config', hint: 'Fix the page range and try again.' };
+    renderBrowse();
+    return;
+  }
+  state.listing.error = null;
+  state.crawlAborted = false;
+  state.listing.busy = options.mode === 'page' ? 'search' : 'crawl';
+  state.listing.skippedDownloaded = 0;
+  const totalPages = range.selection.kind === 'list' ? Math.max(1, range.selection.pages.length) : Math.max(1, pageLimit());
+  state.listing.progress =
+    options.mode === 'page' ? null : { done: 0, total: totalPages, label: `Preparing ${range.label}…` };
+  renderBrowse();
+
+  if (state.listing.tags.trim()) {
+    void send({ type: 'searches/add', payload: { serverId: server.id, query: state.listing.tags.trim() } }).then(() => refreshSuggestions());
+  }
+
+  const collected: BooruPost[] = [];
+  let skippedDownloaded = 0;
+  let done = 0;
+  let matched: number | null = state.listing.matched;
+
+  const takePage = async (page: number): Promise<boolean> => {
+    // Raw user tags go to the router: it adds the tag blacklist, and the adapter
+    // appends the global suffix plus its per-site rating filter.
+    const result = await fetchPage(server.id, state.listing.tags, page);
+    if (!result) return false;
+    if (matched === null && result.totalCount !== null) matched = result.totalCount;
+    const added = collectPosts(collected, result);
+    skippedDownloaded += added.skipped;
+    done += 1;
+    state.listing.progress = { done, total: totalPages, label: `Listed page ${page} · ${collected.length} post(s) so far` };
+    renderBrowse();
+    return result.posts.length > 0;
+  };
+
+  try {
+    if (range.selection.kind === 'list') {
+      const pages = options.mode === 'page' ? [range.selection.pages[0]!] : range.selection.pages;
+      for (const page of pages) {
+        if (state.crawlAborted) break;
+        const more = await takePage(page);
+        if (!more) break;
+      }
+    } else {
+      let page = range.selection.kind === 'open' ? range.selection.start : 1;
+      const limit = options.mode === 'page' ? 1 : pageLimit();
+      for (let step = 0; step < limit; step += 1) {
+        if (state.crawlAborted) break;
+        const more = await takePage(page);
+        if (!more) break;
+        page += 1;
+      }
+    }
+
+    state.listing.matched = matched;
+    state.listing.skippedDownloaded = skippedDownloaded;
+
+    if (collected.length) {
+      const queued = await send<{ added: number; skipped: number; summary: QueueSummary }>({
+        type: 'queue/enqueuePosts',
+        payload: {
+          serverId: server.id,
+          posts: collected.map((post) => ({ id: post.id, label: postLabel(post), postUrl: post.postUrl, rating: post.rating })),
+        },
+      });
+      for (const post of collected) state.thumbnails.set(post.id, post.previewUrl);
+      if (queued) {
+        await refreshQueue();
+        const bits = [`${queued.added} row(s) added`];
+        if (queued.skipped) bits.push(`${queued.skipped} skipped (duplicate or rating filter)`);
+        if (skippedDownloaded) bits.push(`${skippedDownloaded} already downloaded`);
+        state.dockNotice = { text: `${bits.join(' · ')}. Review the list, then press Download selected.`, tone: 'ok' };
+      }
+    } else {
+      state.dockNotice = { text: 'Nothing new to list for that query and range.', tone: 'plain' };
+    }
+
+    if (options.download) await downloadSelected();
+  } finally {
+    state.listing.busy = 'idle';
+    state.listing.progress = null;
+    render();
+  }
+}
+
+async function fetchPage(serverId: string, tags: string, page: number): Promise<SearchResult | null> {
+  const server = currentServer();
+  const effectiveRating = state.listing.ratingOverride ?? server?.ratingFilterEnabled ?? false;
+  const result = await send<SearchResult>({
+    type: 'browse/search',
+    payload: {
+      serverId,
+      spec: {
+        tags,
+        limit: 60,
+        page,
+        ratingFilter: { enabled: effectiveRating, allowed: server?.allowedRatings ?? [] },
+      },
+    },
+  });
+  if (!result) {
+    state.listing.error = {
+      message: 'The site did not answer the listing request.',
+      kind: 'network-failure',
+      hint: 'Try again, or raise the wait between requests in Settings.',
+    };
+    return null;
+  }
+  return result;
+}
+
+/** Filter one page's posts into the collection, counting what was skipped. */
+function collectPosts(collected: BooruPost[], result: SearchResult): { added: number; skipped: number } {
+  let added = 0;
+  let skipped = 0;
+  const seen = new Set(collected.map((post) => post.id));
+  for (const post of result.posts) {
+    if (seen.has(post.id)) continue;
+    if (!postMatchesMedia(post, state.listing.media)) {
+      skipped += 1;
+      continue;
+    }
+    if (state.listing.skipDownloaded && state.history.has(`${post.serverId}:${post.id}`)) {
+      skipped += 1;
+      continue;
+    }
+    seen.add(post.id);
+    collected.push(post);
+    added += 1;
+  }
+  return { added, skipped };
+}
+
+function postLabel(post: BooruPost): string {
+  return post.tags[0] ? `#${post.id} ${post.tags[0]}` : `${post.siteType} #${post.id}`;
+}
+
+// -------------------------------------------------------------- queue actions
+
+async function downloadSelected(): Promise<void> {
+  const ids = [...state.selection].filter((id) => state.queue.items.some((item) => item.id === id && item.status === 'pending'));
+  if (!ids.length) {
+    state.dockNotice = { text: 'Tick at least one queued row first.', tone: 'error' };
+    renderDockBar();
+    return;
+  }
+  state.queue.busy = true;
+  state.dockNotice = { text: `Starting ${ids.length} download(s) — the queue keeps running while you browse.`, tone: 'ok' };
+  renderDockBar();
+  await send({ type: 'queue/run', payload: { itemIds: ids } });
+  await refreshQueue();
+  state.queue.busy = false;
+  render();
+  void watchQueue();
+}
+
+async function startQueue(): Promise<void> {
+  state.queue.busy = true;
+  renderDockBar();
+  await send({ type: 'queue/run' });
+  await refreshQueue();
+  state.queue.busy = false;
+  render();
+  void watchQueue();
+}
+
+async function pauseQueue(paused: boolean): Promise<void> {
+  await send({ type: paused ? 'queue/pause' : 'queue/resume' });
+  await refreshQueue();
+  render();
+  if (!paused) void watchQueue();
+}
+
+async function stopQueue(): Promise<void> {
+  await send({ type: 'queue/pause' });
+  for (const item of state.queue.items.filter((entry) => entry.status === 'pending' || entry.status === 'running')) {
+    await send({ type: 'queue/cancel', payload: { itemId: item.id } });
+  }
+  state.dockNotice = { text: 'Stopped. Canceled rows stay in the list so you can retry them.', tone: 'plain' };
+  await refreshQueue();
+  render();
+}
+
+async function cancelItem(itemId: string): Promise<void> {
+  await send({ type: 'queue/cancel', payload: { itemId } });
+  await refreshQueue();
+  render();
+}
+
+async function removeItems(itemIds: string[]): Promise<void> {
+  if (!itemIds.length) return;
+  await send({ type: 'queue/remove', payload: { itemIds } });
+  for (const id of itemIds) state.selection.delete(id);
+  await refreshQueue();
+  state.dockNotice = { text: `${itemIds.length} row(s) removed from the list. Files on disk were not touched.`, tone: 'plain' };
+  render();
+}
+
+async function retryFailed(): Promise<void> {
+  const result = await send<{ requeued: number; summary: QueueSummary }>({ type: 'queue/retryFailed' });
+  await refreshQueue();
+  if (result) toast(`${result.requeued} row(s) queued again`, 'success');
+  state.dockNotice = { text: `${result?.requeued ?? 0} failed row(s) are queued again.`, tone: 'plain' };
+  render();
+}
+
+async function clearQueue(scope: 'completed' | 'failed' | 'all'): Promise<void> {
+  if (scope === 'all' && state.queue.items.length && !globalThis.confirm('Clear the whole list? Files already downloaded stay on disk.')) return;
+  await send({ type: 'queue/clear', payload: { scope } });
+  await refreshQueue();
+  render();
+}
+
+async function resetHistory(): Promise<void> {
+  const result = await send<{ removed: number }>({ type: 'history/clear' });
+  await refreshHistory();
+  state.listing.skippedDownloaded = 0;
+  toast(`Download history reset (${result?.removed ?? 0} entr${(result?.removed ?? 0) === 1 ? 'y' : 'ies'})`, 'success');
+  render();
+}
+
+async function clearSearches(): Promise<void> {
+  await send({ type: 'searches/clear' });
+  await refreshSuggestions();
+  toast('Search history cleared', 'success');
+  render();
+}
+
+async function downloadPost(): Promise<void> {
+  const route = state.context.route;
+  const server = state.context.server;
+  if (!route?.postId || !server) return;
+  state.post = { ...state.post, busy: true };
+  renderContext();
+  const result = await send<{ filename: string; viaFallback: boolean }>({
+    type: 'posts/download',
+    payload: { serverId: server.id, postId: route.postId },
+  });
+  state.post = { ...state.post, busy: false };
+  if (result) {
+    toast(`Saved ${result.filename}`, 'success');
+    await refreshHistory();
+    state.post = {
+      ...state.post,
+      saved: { filename: result.filename, at: new Date().toISOString() },
+    };
+  }
+  render();
+}
+
+async function addPostToList(): Promise<void> {
+  const route = state.context.route;
+  const server = state.context.server;
+  if (!route?.postId || !server) return;
+  const post = state.post.post;
+  const result = await send<{ added: number; skipped: number }>({
+    type: 'queue/enqueue',
+    payload: {
+      items: [
+        {
+          serverId: server.id,
+          postId: route.postId,
+          label: post ? postLabel(post) : `#${route.postId}`,
+          postUrl: post?.postUrl ?? route.canonicalUrl,
+        },
+      ],
+    },
+  });
+  if (post) state.thumbnails.set(post.id, post.previewUrl);
+  await refreshQueue();
+  state.post = { ...state.post, queued: true };
+  state.dockNotice = {
+    text: result?.added ? `${post ? postLabel(post) : `#${route.postId}`} added to the list.` : 'That post is already in the list.',
+    tone: result?.added ? 'ok' : 'plain',
+  };
+  render();
+}
+
+// ------------------------------------------------------------------ polling
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+let pollTick = 0;
+
+function startPolling(): void {
+  if (pollTimer !== null) globalThis.clearInterval(pollTimer);
+  pollTimer = globalThis.setInterval(() => {
+    void (async () => {
+      const active = state.queue.summary.running > 0 || state.queue.summary.active;
+      pollTick += 1;
+      const shouldRefreshQueue = active || state.tab === 'queue' || state.queue.summary.pending > 0;
+      if (shouldRefreshQueue) await refreshQueue();
+      if (active || pollTick % 5 === 0) await refreshHistory();
+      if (state.tab === 'browse' || state.tab === 'queue') render();
+    })();
+  }, 1200);
+}
+
+/** Wait until the queue stops running (used right after starting a run). */
+async function watchQueue(): Promise<void> {
+  for (let attempt = 0; attempt < 900; attempt += 1) {
+    await refreshQueue();
+    render();
+    if (state.queue.summary.paused) return;
+    if (state.queue.summary.running === 0 && !state.queue.summary.active) return;
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 900));
+  }
+}
+
+// -------------------------------------------------------------- server actions
+
+function openEditor(server: ServerConfigView | null, siteType: string, baseUrl?: string): void {
+  const draft = server ? draftFromServer(server) : draftForSiteType(siteType, state.adapters);
+  state.editor = {
+    draft: baseUrl ? { ...draft, baseUrl: hostnameOf(baseUrl) } : draft,
+    isNew: !server,
+    apiKeyMask: server?.apiKeyMask ?? '',
+    validation: null,
+    validating: false,
+    saving: false,
+  };
+  state.tab = 'servers';
+  render();
+}
+
+function hostnameOf(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    return url;
+  }
+}
+
+async function validateDraft(): Promise<void> {
+  if (!state.editor) return;
+  state.editor.validating = true;
+  renderServersTab();
+  const result = await send<ValidationResult>({ type: 'servers/validateDraft', payload: { server: state.editor.draft } });
+  if (!state.editor) return;
+  state.editor.validating = false;
+  state.editor.validation = result;
+  renderServersTab();
+  if (result) toast(result.ok ? `Validated: ${result.message}` : `Not valid: ${result.message}`, result.ok ? 'success' : 'error', 6000);
+}
+
+async function saveDraft(options: { force: boolean }): Promise<void> {
+  if (!state.editor) return;
+  state.editor.saving = true;
+  renderServersTab();
+  const saved = await send<ServerConfigView>({ type: 'servers/save', payload: state.editor.draft });
+  if (saved) {
+    state.editor = null;
+    await refreshServers();
+    await refreshDiagnostics();
+    toast(`Saved ${saved.label}`, 'success');
+    render();
+  } else if (state.editor) {
+    state.editor.saving = false;
+    renderServersTab();
+    if (!options.force) toast('Save failed — see the message above', 'error');
+  }
+}
+
+async function duplicateServer(id: string): Promise<void> {
+  const created = await send<ServerConfigView>({ type: 'servers/duplicate', payload: { id } });
+  if (created) {
+    await refreshServers();
+    toast(`Duplicated as ${created.label}`, 'success');
+    render();
+  }
+}
+
+async function deleteServer(server: ServerConfigView): Promise<void> {
+  if (!globalThis.confirm(`Delete “${server.label}” and its stored credentials?`)) return;
+  const remaining = await send<ServerConfigView[]>({ type: 'servers/remove', payload: { id: server.id } });
+  if (remaining) {
+    state.servers = remaining;
+    if (!remaining.some((entry) => entry.id === state.listing.serverId)) {
+      state.listing.serverId = remaining.find((entry) => entry.isDefault)?.id ?? remaining[0]?.id ?? null;
+    }
+    await refreshDiagnostics();
+    render();
+  }
+}
+
+async function validateServer(server: ServerConfigView): Promise<void> {
+  state.busyId = server.id;
+  renderServersTab();
+  const result = await send<ValidationResult>({ type: 'servers/validate', payload: { id: server.id } });
+  state.busyId = null;
+  if (result) toast(`${server.label}: ${result.message}`, result.ok ? 'success' : 'error', 7000);
+  await refreshServers();
+  await refreshDiagnostics();
+  render();
+}
+
+async function requestHostAccess(): Promise<void> {
+  if (!state.hostAccess) return;
+  const granted = await platform.permissions.request(state.hostAccess.origin);
+  state.hostAccess = { ...state.hostAccess, granted };
+  toast(granted ? 'Host access granted' : 'Access was not granted', granted ? 'success' : 'warning');
+  render();
+}
+
+async function syncUserAgent(): Promise<void> {
+  const result = await send<{ ok: boolean; applied: number; error?: string }>({ type: 'userAgent/sync' });
+  toast(result?.ok ? `User-Agent rules synced (${result.applied})` : `Sync failed${result?.error ? `: ${result.error}` : ''}`, result?.ok ? 'success' : 'error');
+}
+
+// ------------------------------------------------------------- settings actions
+
+async function patchSettings(patch: Partial<ExtensionSettings>): Promise<void> {
+  const saved = await send<ExtensionSettings>({ type: 'settings/save', payload: patch });
+  if (!saved) return;
+  state.settings = saved;
+  if (patch.theme) applyTheme(saved.theme);
+  if (patch.maxConcurrency) state.queue.maxConcurrency = saved.maxConcurrency;
+  if (patch.mediaFilter) state.listing.media = saved.mediaFilter;
+  if (patch.skipDownloaded !== undefined) state.listing.skipDownloaded = saved.skipDownloaded;
+  if (patch.searchHistoryEnabled !== undefined || patch.searchHistoryLimit !== undefined) await refreshSuggestions();
+  render();
+}
+
+async function saveSettingsAll(): Promise<void> {
+  state.savingSettings = true;
+  renderSettingsTab();
+  const saved = await send<ExtensionSettings>({ type: 'settings/save', payload: state.settings ?? {} });
+  state.savingSettings = false;
+  if (saved) {
+    state.settings = saved;
+    toast('Settings saved — User-Agent rules re-applied', 'success');
+  }
+  render();
+}
+
+async function resetSettings(): Promise<void> {
+  if (!globalThis.confirm('Reset every setting to its default? Saved servers and keys are kept.')) return;
+  const saved = await send<ExtensionSettings>({ type: 'settings/reset' });
+  if (saved) {
+    state.settings = saved;
+    state.listing.media = saved.mediaFilter;
+    state.listing.skipDownloaded = saved.skipDownloaded;
+    applyTheme(saved.theme);
+    toast('Settings reset to defaults', 'success');
+  }
+  render();
+}
+
+async function exportServers(includeSecrets: boolean): Promise<void> {
+  const result = await send<{ json: string; includesSecrets: boolean }>({ type: 'servers/export', payload: { includeSecrets } });
+  if (!result) return;
+  const blob = new Blob([result.json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = `booru-servers${includeSecrets ? '-with-keys' : ''}.json`;
+  anchor.click();
+  globalThis.setTimeout(() => URL.revokeObjectURL(url), 4000);
+  toast(includeSecrets ? 'Export written — it contains your API keys' : 'Export written (no keys)', includeSecrets ? 'warning' : 'success');
+}
+
+async function importServers(json: string, includeSecrets: boolean): Promise<void> {
+  const result = await send<{ imported: number; skipped: number; errors: string[] }>({ type: 'servers/import', payload: { json, includeSecrets } });
+  if (!result) return;
+  await refreshServers();
+  await refreshDiagnostics();
+  toast(`Imported ${result.imported} profile(s)${result.skipped ? `, ${result.skipped} skipped` : ''}`, 'success');
+  render();
+}
+
+async function clearAllCredentials(): Promise<void> {
+  for (const server of state.servers) await send({ type: 'servers/clearCredentials', payload: { id: server.id } });
+  await refreshServers();
+  toast('Stored keys deleted from every profile', 'success');
+  render();
+}
+
+// ------------------------------------------------------------------ servers tab
+
+function renderServersTab(): void {
+  if (state.editor) {
+    const editor = state.editor;
+    const adapter = getAdapter(editor.draft.siteType);
+    const host = h('div');
+    renderServerForm(
+      host,
+      {
+        draft: editor.draft,
+        adapters: state.adapters,
+        credentialFields: adapter ? adapter.credentialFields(editor.draft) : [],
+        isNew: editor.isNew,
+        apiKeyMask: editor.apiKeyMask,
+        suggestedUserAgent: adapter
+          ? adapter.suggestUserAgent({
+              server: { username: editor.draft.username, userId: editor.draft.userId, customUserAgent: editor.draft.customUserAgent },
+              baseUrl: editor.draft.baseUrl,
+            })
+          : '',
+        validation: editor.validation,
+        validating: editor.validating,
+        validatedCurrentValues: editor.validation?.ok === true,
+        saving: editor.saving,
+      },
+      {
+        onChange: (patch) => {
+          if (!state.editor) return;
+          state.editor.draft = { ...state.editor.draft, ...patch };
+          renderServersTab();
+        },
+        onValidate: () => void validateDraft(),
+        onSave: (options) => void saveDraft(options),
+        onCancel: () => {
+          state.editor = null;
+          render();
+        },
+        onSuggestUserAgent: () => {
+          if (!state.editor) return;
+          const current = getAdapter(state.editor.draft.siteType);
+          const suggested = current?.suggestUserAgent({
+            server: { username: state.editor.draft.username, userId: state.editor.draft.userId, customUserAgent: state.editor.draft.customUserAgent },
+            baseUrl: state.editor.draft.baseUrl,
+          });
+          state.editor.draft = { ...state.editor.draft, customUserAgent: suggested ?? '' };
+          renderServersTab();
+        },
+        onBackToList: () => {
+          state.editor = null;
+          render();
+        },
+      },
+    );
+    els.serversHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
+    return;
+  }
+
+  const container = h('div');
+  const listHost = h('div');
+  renderServerList(
+    listHost,
+    { servers: state.servers, adapters: state.adapters, busyId: state.busyId, filter: '' },
+    {
+      onAdd: (siteType?: string) => openEditor(null, siteType ?? 'e621'),
+      onEdit: (server) => openEditor(server, server.siteType),
+      onDuplicate: (server) => void duplicateServer(server.id),
+      onDelete: (server) => void deleteServer(server),
+      onSetDefault: async (server) => {
+        const updated = await send<ServerConfigView[]>({ type: 'servers/setDefault', payload: { id: server.id } });
+        if (updated) {
+          state.servers = updated;
+          state.listing.serverId = server.id;
+          toast(`${server.label} is now the default server`, 'success');
+          render();
+        }
+      },
+      onTest: (server) => void validateServer(server),
+      onFilterChange: () => undefined,
+      onOpenQueue: () => switchTab('queue'),
+    },
+  );
+  for (const child of Array.from(listHost.children)) container.appendChild(child);
+
+  // Diagnostics live here too: "why did this profile fail" belongs next to the list.
+  if (state.diagnostics) {
+    const details = h('details', { class: 'psCard psDiagnostics' });
+    details.appendChild(h('summary', { text: 'Diagnostics — adapter capabilities, environment, validation traces (no credentials)' }));
+    const host = h('div');
+    renderDiagnostics(host, state.diagnostics, {
+      onSyncUserAgent: () => void syncUserAgent(),
+      onCopy: () => {
+        copyDiagnostics(state.diagnostics!);
+        toast('Diagnostics copied (credential-free)', 'success');
+      },
+      onOpenApiDocs: (url: string) => globalThis.open(url, '_blank', 'noreferrer'),
+    });
+    for (const child of Array.from(host.children)) details.appendChild(child);
+    container.appendChild(details);
+  }
+  els.serversHost.replaceChildren(...(Array.from(container.children) as HTMLElement[]));
+}
+
+// ------------------------------------------------------------------ settings tab
+
+function renderSettingsTab(): void {
+  if (!state.settings) {
+    els.settingsHost.replaceChildren(h('p', { class: 'psMuted', text: 'Loading settings…' }));
+    return;
+  }
+  const host = h('div');
+  renderSettingsSections(
+    host,
+    {
+      settings: state.settings,
+      saving: state.savingSettings,
+      servers: state.servers,
+      adapters: state.adapters,
+      historyCount: state.historyCount,
+      searchCount: state.searchCount,
+      hostAccess: state.hostAccess,
+    },
+    {
+      onChange: (patch) => void patchSettings(patch),
+      onSave: () => void saveSettingsAll(),
+      onReset: () => void resetSettings(),
+      onExport: (includeSecrets) => void exportServers(includeSecrets),
+      onImport: (json, includeSecrets) => void importServers(json, includeSecrets),
+      onClearAllCredentials: () => void clearAllCredentials(),
+      onSyncUserAgent: () => void syncUserAgent(),
+      onRequestHostAccess: () => void requestHostAccess(),
+      onClearHistory: () => void resetHistory(),
+      onClearSearches: () => void clearSearches(),
+      onOpenServers: () => switchTab('servers'),
+    },
+  );
+  els.settingsHost.replaceChildren(...(Array.from(host.children) as HTMLElement[]));
+}
+
+// ---------------------------------------------------------------------- start
+
+globalThis.addEventListener?.('hashchange', () => {
+  const next = hashTab();
+  if (next && next !== state.tab) {
+    state.tab = next;
+    render();
+  }
+});
+
+void boot();

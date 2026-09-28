@@ -1,10 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Booru Server Manager",
-  "version": "0.1.0",
-  "description": "One extension, many saved booru servers: manage accounts for e621, Danbooru and Gelbooru-family sites and download with a batch queue.",
-  "minimum_chrome_version": "110",
-  "permissions": ["storage", "downloads", "declarativeNetRequest", "activeTab"],
+  "version": "0.2.0",
+  "description": "Side panel downloader for many saved booru servers: manage e621, Danbooru and Gelbooru-family accounts, list results, review and batch-download.",
+  "minimum_chrome_version": "116",
+  "permissions": [
+    "storage",
+    "downloads",
+    "declarativeNetRequest",
+    "activeTab",
+    "sidePanel"
+  ],
   "host_permissions": [
     "https://e621.net/*",
     "https://e926.net/*",
@@ -15,14 +21,18 @@
     "https://www.gelbooru.com/*",
     "https://*.gelbooru.com/*"
   ],
-  "optional_host_permissions": ["https://*/*"],
+  "optional_host_permissions": [
+    "https://*/*"
+  ],
   "background": {
     "service_worker": "background/service-worker.js",
     "type": "module"
   },
+  "side_panel": {
+    "default_path": "panel/panel.html"
+  },
   "action": {
-    "default_title": "Booru Server Manager",
-    "default_popup": "popup/popup.html",
+    "default_title": "Booru Server Manager \u2014 open the download panel",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",
@@ -47,8 +57,14 @@
         "https://www.gelbooru.com/index.php*",
         "https://*.gelbooru.com/index.php*"
       ],
-      "js": ["content/post-button.js"],
+      "js": [
+        "content/post-button.js"
+      ],
       "run_at": "document_idle"
     }
-  ]
+  ],
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": true
+  }
 }

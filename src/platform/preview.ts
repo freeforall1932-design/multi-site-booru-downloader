@@ -81,6 +81,15 @@ export class PreviewPlatform implements Platform {
     globalThis.location.hash = hash.replace(/^#/, '');
   }
 
+  /** Preview stand-in: the "panel" opens as a normal page in its own tab. */
+  async openPanel(): Promise<boolean> {
+    const params = new URLSearchParams(globalThis.location.search);
+    const tab = params.get('tab');
+    const query = tab ? `?tab=${encodeURIComponent(tab)}` : '';
+    globalThis.open(`panel/panel.html${query}`, '_blank', 'noopener');
+    return true;
+  }
+
   async describeEnvironment(): Promise<Record<string, string>> {
     return {
       Environment: 'browser preview (no extension APIs)',

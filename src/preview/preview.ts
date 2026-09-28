@@ -13,6 +13,7 @@
 import { registerBuiltinAdapters } from '../adapters/index.js';
 import { BooruClient } from '../core/client.js';
 import type { UiRequest } from '../core/messages.js';
+import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -109,7 +110,9 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
   const validation = new ValidationService(http);
   const client = new BooruClient({ servers, settings, http, validation });
   const downloader = new PreviewDownloader();
-  const queue = new DownloadQueue({ storage, client, servers, settings, downloader });
+  const history = new DownloadHistoryStore(storage);
+  const searches = new SearchHistoryStore(storage);
+  const queue = new DownloadQueue({ storage, client, servers, settings, downloader, history });
 
   const router = createRouter({
     client,
@@ -117,6 +120,9 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
     servers,
     settings,
     downloader,
+    storage,
+    history,
+    searches,
     // The preview keeps no chrome APIs, so UA rewriting is reported as a no-op.
     environment: 'preview',
     version: '0.1.0-preview',
