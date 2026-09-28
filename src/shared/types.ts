@@ -235,6 +235,21 @@ export interface DownloadRecord {
   downloadId: number | null;
 }
 
+/** Where a toolbar click lands: the dockable side panel or the classic popup. */
+export type UiMode = 'sidepanel' | 'popup';
+
+/** Panel screens, mirroring the tab strip at the top of the side panel. */
+export type PanelTab = 'browse' | 'queue' | 'servers' | 'settings';
+
+/** Coarse media kind used by the listing and queue filters. */
+export type MediaFilter = 'all' | 'video' | 'image';
+
+/** What to do when the browser reports an existing file with the same name. */
+export type DuplicateBehaviour = 'uniquify' | 'overwrite';
+
+/** Original file, or the site's smaller "sample" rendition when it has one. */
+export type FilePreference = 'original' | 'sample';
+
 export interface ExtensionSettings {
   /** Directory template for saved files, e.g. `booru/{siteType}`. */
   folderTemplate: string;
@@ -262,6 +277,34 @@ export interface ExtensionSettings {
   maxRetries: number;
   /** Theme for the UI pages. */
   theme: 'system' | 'light' | 'dark';
+
+  // ---------------------------------------------------------------- side panel
+  /** What a toolbar click opens (same idea as NHentai Downloader's `uiMode`). */
+  uiMode: UiMode;
+  /** Tab the side panel shows when it opens. */
+  panelDefaultTab: PanelTab;
+  /** Default media filter in the listing card. */
+  mediaFilter: MediaFilter;
+  /** Hide posts that are already in the download history. */
+  skipDownloaded: boolean;
+  /** Hard cap on pages a single listing fetch may walk (rule34video: 150). */
+  pageRangeLimit: number;
+  /** Queue rows rendered at once; the rest is summarised as "n more". */
+  queueRowLimit: number;
+  /** Show post thumbnails in queue rows. */
+  showThumbnails: boolean;
+  /** Start the queue as soon as "Download selected" is pressed. */
+  autoStartQueue: boolean;
+  /** Existing file with the same name: keep both or overwrite. */
+  duplicateBehaviour: DuplicateBehaviour;
+  /** Download the full file or the smaller sample the site offers. */
+  filePreference: FilePreference;
+  /** Space/comma separated tags excluded from every search (`-tag`). */
+  tagBlacklist: string;
+  /** Remember the searches you ran, per server. */
+  searchHistoryEnabled: boolean;
+  /** How many searches to keep per server. */
+  searchHistoryLimit: number;
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
@@ -278,7 +321,42 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   enforceRatingFilterOnDownload: true,
   maxRetries: 3,
   theme: 'system',
+
+  uiMode: 'sidepanel',
+  panelDefaultTab: 'browse',
+  mediaFilter: 'all',
+  skipDownloaded: true,
+  pageRangeLimit: 150,
+  queueRowLimit: 60,
+  showThumbnails: true,
+  autoStartQueue: true,
+  duplicateBehaviour: 'uniquify',
+  filePreference: 'original',
+  tagBlacklist: '',
+  searchHistoryEnabled: true,
+  searchHistoryLimit: 12,
 };
+
+/** Result of a successful download, kept so listings can skip it next time. */
+export interface DownloadHistoryEntry {
+  /** `${serverId}:${postId}` - the uniqueness key. */
+  key: string;
+  serverId: string;
+  siteType: SiteType;
+  postId: string;
+  label: string;
+  filename: string;
+  postUrl: string;
+  bytes: number | null;
+  at: string;
+}
+
+/** One remembered search, per server (Anime Boxes keeps the same list). */
+export interface SearchHistoryEntry {
+  serverId: string;
+  query: string;
+  at: string;
+}
 
 export type QueueItemStatus = 'pending' | 'running' | 'done' | 'failed' | 'skipped' | 'canceled';
 
@@ -288,6 +366,8 @@ export interface QueueItem {
   postId: string;
   label: string;
   postUrl: string;
+  /** Canonical rating known at enqueue time (null for items queued before v0.2). */
+  rating: Rating | null;
   status: QueueItemStatus;
   attempts: number;
   error: string | null;

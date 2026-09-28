@@ -8,6 +8,7 @@ import type {
   Rating,
   ServerConfig,
 } from '../shared/types.js';
+import { historyKey, type DownloadHistoryStore } from './history.js';
 import { createId, deepClone } from '../shared/util.js';
 import type { BooruClient } from './client.js';
 import type { Downloader } from './downloads.js';
@@ -23,6 +24,8 @@ export interface QueueDeps {
   servers: ServerStore;
   settings: SettingsStore;
   downloader: Downloader;
+  /** Optional download notebook: written on success, read by "skip downloaded". */
+  history?: DownloadHistoryStore;
   http?: HttpClient;
   /** Explicit per-server rate spacing override (defaults to adapter + settings). */
   spacingMs?: number;
@@ -34,6 +37,7 @@ export interface EnqueueInput {
   postId: string;
   label?: string;
   postUrl?: string;
+  rating?: Rating | null;
 }
 
 /**
@@ -76,7 +80,12 @@ export class DownloadQueue {
     const items = Array.isArray(stored?.items) ? stored.items : [];
     // A service worker restart mid-flight leaves items marked "running"; treat
     // them as pending again so the work is not silently dropped.
-    this.items = items.map((item) => (item.status === 'running' ? { ...item, status: 'pending' as const } : item));
+    this.items = items.map((item) => ({
+      ...item,
+      // Rows queued before the rating/media columns existed have no rating.
+      rating: item.rating ?? null,
+      status: item.status === 'running' ? ('pending' as const) : item.status,
+    }));
     this.paused = stored?.paused ?? false;
     this.loaded = true;
   }
@@ -140,6 +149,7 @@ export class DownloadQueue {
         postId: input.postId,
         label: input.label ?? `post ${input.postId}`,
         postUrl: input.postUrl ?? '',
+        rating: input.rating ?? null,
         status: 'pending',
         attempts: 0,
         error: null,
@@ -173,6 +183,7 @@ export class DownloadQueue {
         postId: post.id,
         label: post.label ?? `${server.siteType} #${post.id}`,
         postUrl: post.postUrl,
+        rating: post.rating ?? null,
       })),
     );
     // Rating-filtered posts count as skipped so the UI can say "3 skipped".
@@ -219,6 +230,16 @@ export class DownloadQueue {
     return before - this.items.length;
   }
 
+  /** Drop specific rows (the panel's "Remove selected"), whatever their status. */
+  async remove(itemIds: readonly string[]): Promise<number> {
+    await this.ensureLoaded();
+    const wanted = new Set(itemIds);
+    const before = this.items.length;
+    this.items = this.items.filter((item) => !wanted.has(item.id));
+    await this.persist();
+    return before - this.items.length;
+  }
+
   async pause(): Promise<void> {
     await this.ensureLoaded();
     this.paused = true;
@@ -233,8 +254,13 @@ export class DownloadQueue {
 
   // ---------------------------------------------------------------- running
 
-  /** Process pending items until the queue is empty or paused. */
-  async run(): Promise<QueueSummary> {
+  /**
+   * Process pending items until the queue is empty or paused.
+   *
+   * `onlyIds` restricts the run to the ticked rows (the panel's "Download
+   * selected"); every other pending row is left untouched for later.
+   */
+  async run(options: { onlyIds?: readonly string[] } = {}): Promise<QueueSummary> {
     await this.ensureLoaded();
     if (this.running) return this.summary();
     this.paused = false;
@@ -242,9 +268,10 @@ export class DownloadQueue {
     this.emit();
     const settings = await this.deps.settings.get();
     const concurrency = Math.max(1, Math.min(settings.maxConcurrency, 8));
+    const only = options.onlyIds ? new Set(options.onlyIds) : null;
 
     try {
-      const workers = Array.from({ length: concurrency }, () => this.worker(settings));
+      const workers = Array.from({ length: concurrency }, () => this.worker(settings, only));
       await Promise.all(workers);
     } finally {
       this.running = false;
@@ -253,10 +280,10 @@ export class DownloadQueue {
     return this.summary();
   }
 
-  private async worker(settings: ExtensionSettings): Promise<void> {
+  private async worker(settings: ExtensionSettings, only: Set<string> | null): Promise<void> {
     for (;;) {
       if (this.paused) return;
-      const next = this.items.find((item) => item.status === 'pending');
+      const next = this.items.find((item) => item.status === 'pending' && (!only || only.has(item.id)));
       if (!next) return;
       next.status = 'running';
       next.attempts += 1;
@@ -317,7 +344,31 @@ export class DownloadQueue {
       },
     });
 
-    const outcome = await this.deps.downloader.download({ url: post.fileUrl, filename: path.fullPath, conflictAction: 'uniquify' });
+    const target = settings.filePreference === 'sample' && post.sampleUrl ? post.sampleUrl : post.fileUrl;
+    const outcome = await this.deps.downloader.download({
+      url: target,
+      filename: path.fullPath,
+      conflictAction: settings.duplicateBehaviour === 'overwrite' ? 'overwrite' : 'uniquify',
+    });
+    // Remember the success so the listing can skip this post next time. A history
+    // failure must never fail the download itself.
+    if (this.deps.history) {
+      try {
+        await this.deps.history.add({
+          key: historyKey(server.id, post.id),
+          serverId: server.id,
+          siteType: server.siteType,
+          postId: post.id,
+          label: item.label,
+          filename: path.fullPath,
+          postUrl: post.postUrl,
+          bytes: outcome.bytes,
+          at: new Date(this.now()).toISOString(),
+        });
+      } catch {
+        /* non-fatal: the file is on disk either way */
+      }
+    }
     return { filename: path.fullPath, bytes: outcome.bytes };
   }
 }
