@@ -19,7 +19,7 @@
  */
 import type { AdapterCatalogEntry } from '../core/messages.js';
 import { TEMPLATE_SEPARATOR, TEMPLATE_TOKENS, buildTemplate, isCanonicalTemplate, previewNaming, templateTokensInUse } from '../core/template.js';
-import type { ExtensionSettings, MediaFilter, ServerConfigView } from '../shared/types.js';
+import { DEFAULT_MIRROR_FOLDER, type ExtensionSettings, type MediaFilter, type ServerConfigView } from '../shared/types.js';
 import { button, h } from './dom.js';
 import { toast } from './toast.js';
 
@@ -171,6 +171,7 @@ export function renderSettingsSections(
         [
           { value: 'browse', label: 'Browse (search + listing)' },
           { value: 'queue', label: 'Queue' },
+          { value: 'links', label: 'Links (mirror link collector)' },
           { value: 'servers', label: 'Servers' },
           { value: 'settings', label: 'Settings' },
         ],
@@ -269,6 +270,49 @@ export function renderSettingsSections(
         { id: 'psDuplicate' },
       ),
       'Keep both is the safe default: nothing already on disk is replaced. Overwrite is useful when a post was re-uploaded with a better file.',
+    ),
+  );
+
+  container.appendChild(h('hr', { class: 'psDivider' }));
+
+  // -------------------------------------------------- 2b. mirror link collector
+  container.appendChild(
+    section(
+      'Mirror links',
+      'The Links tab collects the off-site download links inside a creator’s posts (Google Drive, Mega, MediaFire, …). These three options decide what it keeps and where those files go.',
+    ),
+  );
+  container.appendChild(
+    row(
+      'Only download-looking links',
+      select(
+        settings.mirrorLinksFilter,
+        [
+          { value: 'downloads', label: 'Known providers + file-looking URLs' },
+          { value: 'any', label: 'Every external link' },
+        ],
+        (value) => callbacks.onChange({ mirrorLinksFilter: value as ExtensionSettings['mirrorLinksFilter'] }),
+        { id: 'psMirrorFilter' },
+      ),
+      'The default keeps links from recognised file hosts and URLs that end in a file, look like a download or carry a long hash. "Every external link" is the noisy-but-complete option for posts that link somewhere unusual. Links on the site itself are never collected - those are normal post downloads.',
+    ),
+  );
+  container.appendChild(
+    row(
+      'Extra provider hosts',
+      textInput('psMirrorHosts', settings.mirrorExtraHosts, 'mega.nz, mydrive.example', (value) =>
+        callbacks.onChange({ mirrorExtraHosts: value }),
+      ),
+      'Which hosts count as providers, space or comma separated. Add your own mirror here; a subdomain counts too, so `mega.nz` also matches `www.mega.nz`.',
+    ),
+  );
+  container.appendChild(
+    row(
+      'Mirror folder template',
+      textInput('psMirrorFolder', settings.mirrorFolderTemplate, DEFAULT_MIRROR_FOLDER, (value) =>
+        callbacks.onChange({ mirrorFolderTemplate: value }),
+      ),
+      `Where collected links are saved. Tokens here describe a URL, not a post: {host} {provider} {siteType} {filename} {ext} {date}. Default: ${DEFAULT_MIRROR_FOLDER}.`,
     ),
   );
 

@@ -62,15 +62,17 @@ its event stream is redacted before it is emitted.
 | `registry` + `adapters/index.ts` | `registerBuiltinAdapters()` is the single registration point |
 | `storage.ts` | `StorageArea` interface + Chrome/Memory/Web implementations + `STORAGE_KEYS`, schema version, `migrateStorage` |
 | `servers.ts` | `ServerStore`: CRUD, default handling, duplicate (secrets copied, validation reset), credential clearing, masking (`toServerView`), JSON export/import, validation bookkeeping |
-| `settings.ts` | `SettingsStore`: defaults, partial saves, reset, migration-safe merge (including the side-panel keys: `uiMode`, `panelDefaultTab`, `mediaFilter`, `skipDownloaded`, `pageRangeLimit`, `queueRowLimit`, `showThumbnails`, `autoStartQueue`, `duplicateBehaviour`, `filePreference`, `tagBlacklist`, `searchHistory*`) |
+| `settings.ts` | `SettingsStore`: defaults, partial saves, reset, migration-safe merge (including the side-panel keys: `uiMode`, `panelDefaultTab`, `mediaFilter`, `skipDownloaded`, `pageRangeLimit`, `queueRowLimit`, `showThumbnails`, `autoStartQueue`, `duplicateBehaviour`, `filePreference`, `tagBlacklist`, `searchHistory*`, `mirrorLinksFilter`, `mirrorExtraHosts`, `mirrorFolderTemplate`) |
 | `history.ts` | `DownloadHistoryStore` + `SearchHistoryStore`: the panel's two notebooks (`bsm.history`, `bsm.searches`) |
 | `search.ts` | `composeSearchTags`: tag blacklist + global suffix applied to every query |
 | `pages.ts` | `parsePageRange` / `fromToRange` / `batchRange`: the listing card's page grammar (`2,4,6-10`, `50-`, `all`) with the configured cap |
 | `template.ts` | Filename-template token catalog, canonical-template detection, preview rendering |
 | `validation.ts` | `ValidationService`: runs an adapter's ordered probes, classifies results, produces a `ValidationResult` with a redacted trace |
 | `client.ts` | `BooruClient`: server/adapter resolution, search, post lookup, URL → post resolution, rating-filter decisions |
-| `queue.ts` | `DownloadQueue`: persistence, de-duplication, concurrency, pause/resume/retry/cancel/clear, per-item failure recording |
-| `naming.ts` | Template tokens, `renderTemplate`, `sanitizePathSegment`, `sanitizeFolderPath`, `buildDownloadPath` (traversal + length safety, warnings) |
+| `queue.ts` | `DownloadQueue`: persistence, de-duplication, concurrency, pause/resume/retry/cancel/clear, per-item failure recording. Rows are `post` rows (`serverId:postId`) or `link` rows (`link:<url>`, downloaded straight off-site) |
+| `links.ts` | Mirror-link rules (provider table, extension/download-path/hash heuristics, own-host skip), payload-wide URL extraction and the `.txt` export/import format (pure functions, no DOM - the worker has no `DOMParser`) |
+| `link-store.ts` | `MirrorLinkStore`: the durable collected-link list (`bsm.links`), merge-by-id on re-scan, status/outcome bookkeeping, `MAX_MIRROR_LINKS` cap |
+| `naming.ts` | Template tokens, `renderTemplate`, `sanitizePathSegment`, `sanitizeFolderPath`, `buildDownloadPath` (traversal + length safety, warnings) and `buildMirrorPath` (the URL-shaped tokens link rows use) |
 | `downloads.ts` | `Downloader` interface, `ChromeDownloader`, `RecordingDownloader` |
 | `userAgent.ts` | Builds and syncs `declarativeNetRequest` dynamic User-Agent rules from the saved profiles |
 | `router.ts`, `messages.ts` | The message protocol and the single request handler |
@@ -138,10 +140,13 @@ is always `{ ok: true, data }` or `{ ok: false, error: { message, kind, hint } }
 servers/  list · save · remove · duplicate · setDefault · validate · validateDraft
           clearCredentials · export · import
 browse/   search                      (adds the tag blacklist before the adapter sees it)
+links/    list · posts · scanPost · queue · remove · clear · export · import
+          (the Links tab: one listing page → one scan per post → durable list)
 posts/    get · resolveUrl · download
 routes/   detect
-queue/    list · enqueue · enqueuePosts · run · pause · resume · retryFailed
-          clear · cancel · remove        (run accepts { itemIds } - "Download selected")
+queue/    list · enqueue · enqueuePosts · enqueueLinks · run · pause · resume
+          retryFailed · clear · cancel · remove
+          (run accepts { itemIds } - "Download selected")
 history/  list · remove · clear        (the download notebook)
 searches/ list · add · remove · clear  (recent queries per server)
 settings/ get · save · reset
@@ -163,6 +168,10 @@ Rules enforced by the router:
   next-step `hint`, so the UI can separate *authentication failure* from
   *endpoint mismatch* from *rate limiting* from *network failure*.
 - `downloads/post` re-checks the rating filter before saving a file.
+- `links/import` classifies imported URLs with `filter: 'any'` and no own-host
+  rule: a file the user hands over *is* the instruction. `links/scanPost` is the
+  opposite - it applies the configured rules and skips the site's own host, whose
+  files the adapter already downloads.
 
 ## Request flows
 
@@ -214,6 +223,25 @@ queue/run → worker loop (maxConcurrency)
              → Downloader.download → status done/failed/skipped + error kind
 ```
 
+**Mirror-link collection** (the Links tab)
+
+```
+links/posts { serverId, query, page }
+  └─ adapter listing (one page) → deduplicate by postUrl → post refs
+
+links/scanPost { serverId, postId, postUrl?, postTitle?, creator? }
+  ├─ client.getPostPayload  ← the *raw* post JSON (attachment rows drop `content`)
+  ├─ extractUrlsFromPayload → classifyMirrorLink (providers/extensions/download
+  │                            paths/hash; own host always skipped)
+  └─ MirrorLinkStore.add    → merge by URL id; report added/duplicate
+
+links/queue → queue.enqueueLinks      → one `link` row per URL (`link:<url>`)
+links/export / links/import           → formatLinkExport / parseLinkExport (round-trip)
+
+queue/run, link row → buildMirrorPath (URL tokens) → Downloader.download
+  └─ no server, no adapter, no rating filter; outcome synced back to bsm.links
+```
+
 ## Storage schema
 
 `chrome.storage.local` (never `sync`, because it holds API keys):
@@ -225,6 +253,7 @@ queue/run → worker loop (maxConcurrency)
 | `bsm.queue` | `{ items: QueueItem[], paused: boolean }` — the panel's row list *is* this list |
 | `bsm.history` | `DownloadHistoryEntry[]` (newest first, capped at 5000) — powers "skip downloaded" |
 | `bsm.searches` | `SearchHistoryEntry[]` — recent queries per server (capped by the setting) |
+| `bsm.links` | `MirrorLink[]` — links collected by the Links tab, with their post context and download outcome (capped at 20,000) |
 | `bsm.meta` | `{ schemaVersion, firstRunAt }` |
 
 `migrateStorage()` runs on install/update and is the single place to react to a
@@ -275,6 +304,7 @@ Both paths are optional and visible in *Settings → User-Agent handling*.
 | `tests/core/queue.test.ts` | De-duplication, rating enforcement, failure recording, pause/retry/clear, persistence, concurrency |
 | `tests/core/http.test.ts` | Rate limiter spacing, retries, abort, redaction, JSON/HTML/empty-body handling, taxonomy |
 | `tests/core/router.test.ts` | The whole message protocol against the mock booru APIs, including secret masking in every response |
+| `tests/core/links.test.ts` | Link rules, payload extraction, export/import round-trip, the link store's merge rules, `link` queue rows and the whole `links/*` flow against the mock creator archive |
 
 All suites run offline: `tests/helpers.ts` wires the real service graph against
 `MemoryStorageArea`, a recording downloader and the mock booru fetch.

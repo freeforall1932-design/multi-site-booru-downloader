@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, type ExtensionSettings, type PanelTab } from '../shared/types.js';
+import { DEFAULT_SETTINGS, DEFAULT_MIRROR_FOLDER, type ExtensionSettings, type PanelTab } from '../shared/types.js';
 import { clamp, toInt } from '../shared/util.js';
 import { STORAGE_KEYS, type StorageArea } from './storage.js';
 
@@ -38,11 +38,36 @@ export function normalizeSettings(raw: unknown): ExtensionSettings {
     tagBlacklist: sanitizeTagList(input.tagBlacklist, 500),
     searchHistoryEnabled: input.searchHistoryEnabled ?? DEFAULT_SETTINGS.searchHistoryEnabled,
     searchHistoryLimit: clamp(toInt(input.searchHistoryLimit, DEFAULT_SETTINGS.searchHistoryLimit), 0, 50),
+
+    mirrorFolderTemplate: sanitizeTemplate(input.mirrorFolderTemplate, DEFAULT_MIRROR_FOLDER),
+    mirrorExtraHosts: sanitizeHostList(input.mirrorExtraHosts),
+    mirrorLinksFilter: input.mirrorLinksFilter === 'any' ? 'any' : 'downloads',
   };
 }
 
 function isPanelTab(value: unknown): value is PanelTab {
-  return value === 'browse' || value === 'queue' || value === 'servers' || value === 'settings';
+  return value === 'browse' || value === 'queue' || value === 'links' || value === 'servers' || value === 'settings';
+}
+
+/**
+ * Free-text host list (`mega.nz, mydrive.example`). Users paste whole URLs by
+ * habit, so the scheme, path and a leading `www.` are stripped here.
+ */
+function sanitizeHostList(value: unknown): string {
+  if (typeof value !== 'string') return '';
+  return value
+    .split(/[\s,]+/)
+    .map((token) =>
+      token
+        .trim()
+        .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+        .replace(/\/.*$/, '')
+        .replace(/^www\./i, '')
+        .toLowerCase(),
+    )
+    .filter((token) => /^[a-z0-9.-]+\.[a-z]{2,}$/.test(token))
+    .join(' ')
+    .slice(0, 500);
 }
 
 /**

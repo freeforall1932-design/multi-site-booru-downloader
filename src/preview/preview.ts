@@ -14,6 +14,7 @@ import { registerBuiltinAdapters } from '../adapters/index.js';
 import { BooruClient } from '../core/client.js';
 import type { UiRequest } from '../core/messages.js';
 import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
+import { MirrorLinkStore } from '../core/link-store.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -79,6 +80,16 @@ export function defaultPreviewServers(): ServerConfig[] {
       allowedRatings: ['safe'],
       ratingFilterEnabled: false,
     }),
+    // Creator archive: no login, and the demo creator's posts carry the mirror
+    // links the Links tab collects (see `MOCK_CREATOR_POSTS`).
+    createServerConfig({
+      siteType: 'pawchive',
+      baseUrl: 'https://pawchive.pw',
+      label: 'Pawchive (demo creator)',
+      customUserAgent: 'BooruServerManager/0.1.0 (preview harness)',
+      allowedRatings: ['general', 'safe', 'sensitive', 'questionable', 'explicit'],
+      ratingFilterEnabled: false,
+    }),
   ];
 }
 
@@ -112,7 +123,8 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
   const downloader = new PreviewDownloader();
   const history = new DownloadHistoryStore(storage);
   const searches = new SearchHistoryStore(storage);
-  const queue = new DownloadQueue({ storage, client, servers, settings, downloader, history });
+  const links = new MirrorLinkStore(storage);
+  const queue = new DownloadQueue({ storage, client, servers, settings, downloader, history, links });
 
   const router = createRouter({
     client,
@@ -123,6 +135,7 @@ export async function startPreview(options: { reseed?: boolean } = {}): Promise<
     storage,
     history,
     searches,
+    links,
     // The preview keeps no chrome APIs, so UA rewriting is reported as a no-op.
     environment: 'preview',
     version: '0.1.0-preview',

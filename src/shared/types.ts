@@ -262,8 +262,71 @@ export interface DownloadRecord {
 /** Where a toolbar click lands: the dockable side panel or the classic popup. */
 export type UiMode = 'sidepanel' | 'popup';
 
+/** How thorough the mirror-link filter is (the userscript's format/provider toggles). */
+export type MirrorLinkFilter = 'downloads' | 'any';
+
+/** Where a collected mirror link's file is put, relative to the download root. */
+export const DEFAULT_MIRROR_FOLDER = 'mirrors/{host}';
+
+export type MirrorLinkStatus = 'new' | 'queued' | 'done' | 'failed';
+
+/**
+ * One off-site download link found inside a post (Google Drive, Mega, …).
+ *
+ * These are *not* booru posts: the file is not on the site's own host, so the
+ * adapter cannot build a download request for it. The link is stored with the
+ * post it came from, offered as a queue row, and can be exported/imported as a
+ * plain `.txt` list so an external download manager can be fed the same work.
+ */
+export interface MirrorLink {
+  /** Stable id derived from the normalised URL - re-scanning never duplicates. */
+  id: string;
+  url: string;
+  host: string;
+  /** Friendly provider name (`Mega`, `Google Drive`, …) or the bare host. */
+  provider: string;
+  /** Profile the link was collected with (provenance, not a download target). */
+  serverId: string | null;
+  siteType: SiteType | null;
+  postId: string | null;
+  postTitle: string | null;
+  postUrl: string | null;
+  creator: string | null;
+  addedAt: string;
+  status: MirrorLinkStatus;
+  attempts: number;
+  error: string | null;
+  filename: string | null;
+  bytes: number | null;
+  updatedAt: string;
+}
+
+export interface MirrorLinkStats {
+  total: number;
+  new: number;
+  queued: number;
+  done: number;
+  failed: number;
+}
+
+/** Section header written by `formatLinkExport` and read back by `parseLinkExport`. */
+export interface MirrorLinkSection {
+  /** `post` sections carry the post URL/title, `provider` sections the host. */
+  kind: 'post' | 'provider';
+  title: string;
+  postUrl: string | null;
+}
+
 /** Panel screens, mirroring the tab strip at the top of the side panel. */
-export type PanelTab = 'browse' | 'queue' | 'servers' | 'settings';
+export type PanelTab = 'browse' | 'queue' | 'links' | 'servers' | 'settings';
+
+/**
+ * What a queue row is: a post on a saved server, or a collected mirror link.
+ *
+ * Both live in the same list on purpose - "the list is the queue" - so a run, a
+ * resume after a worker restart and the row toolbars work the same for either.
+ */
+export type QueueItemKind = 'post' | 'link';
 
 /** Coarse media kind used by the listing and queue filters. */
 export type MediaFilter = 'all' | 'video' | 'image';
@@ -329,6 +392,17 @@ export interface ExtensionSettings {
   searchHistoryEnabled: boolean;
   /** How many searches to keep per server. */
   searchHistoryLimit: number;
+
+  // ------------------------------------------------------------ mirror links
+  /**
+   * Folder template for collected mirror links. Tokens: `{host}`, `{provider}`,
+   * `{siteType}`, `{filename}`, `{ext}`, `{date}`.
+   */
+  mirrorFolderTemplate: string;
+  /** Extra provider hosts the Links tab should treat as download links. */
+  mirrorExtraHosts: string;
+  /** `downloads` keeps known providers + download-looking URLs; `any` keeps every external link. */
+  mirrorLinksFilter: MirrorLinkFilter;
 }
 
 export const DEFAULT_SETTINGS: ExtensionSettings = {
@@ -359,6 +433,10 @@ export const DEFAULT_SETTINGS: ExtensionSettings = {
   tagBlacklist: '',
   searchHistoryEnabled: true,
   searchHistoryLimit: 12,
+
+  mirrorFolderTemplate: DEFAULT_MIRROR_FOLDER,
+  mirrorExtraHosts: '',
+  mirrorLinksFilter: 'downloads',
 };
 
 /** Result of a successful download, kept so listings can skip it next time. */
@@ -390,6 +468,14 @@ export interface QueueItem {
   postId: string;
   label: string;
   postUrl: string;
+  /**
+   * `post` (default, rows queued before this existed too) or `link` for a mirror
+   * URL collected by the Links tab. Link rows download `url` directly and skip
+   * the post lookup, the adapter and the rating filter.
+   */
+  kind?: QueueItemKind;
+  /** The mirror URL of a `link` row. */
+  url?: string | null;
   /** Canonical rating known at enqueue time (null for items queued before v0.2). */
   rating: Rating | null;
   status: QueueItemStatus;

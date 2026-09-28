@@ -1,6 +1,7 @@
 import { registerBuiltinAdapters } from '../src/adapters/index.js';
 import { BooruClient } from '../src/core/client.js';
 import { DownloadHistoryStore, SearchHistoryStore } from '../src/core/history.js';
+import { MirrorLinkStore } from '../src/core/link-store.js';
 import { DownloadQueue } from '../src/core/queue.js';
 import { ServerStore } from '../src/core/servers.js';
 import { SettingsStore } from '../src/core/settings.js';
@@ -36,7 +37,8 @@ export function createHarness(options: TestHarnessOptions = {}) {
   const downloader = new RecordingDownloader();
   const history = new DownloadHistoryStore(area);
   const searches = new SearchHistoryStore(area);
-  const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history });
+  const links = new MirrorLinkStore(area);
+  const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history, links });
   const router = createRouter({
     client,
     queue,
@@ -46,6 +48,7 @@ export function createHarness(options: TestHarnessOptions = {}) {
     storage: area,
     history,
     searches,
+    links,
     environment: 'extension',
     version: 'test',
   });
@@ -57,7 +60,7 @@ export function createHarness(options: TestHarnessOptions = {}) {
     if (settingsOverrides) await settings.save(settingsOverrides);
   };
 
-  return { area, settings, servers, http, validation, client, downloader, queue, history, searches, router, seed };
+  return { area, settings, servers, http, validation, client, downloader, queue, history, searches, links, router, seed };
 }
 
 export function e621Server(overrides: Partial<ServerConfig> = {}): ServerConfig {

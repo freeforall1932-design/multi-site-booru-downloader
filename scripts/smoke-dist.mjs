@@ -16,6 +16,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const root = process.cwd();
+/** The preview platform's `send`, shared with the panel checks in `main()`. */
+let previewSend = null;
 const checks = [];
 let failures = 0;
 const timers = [];
@@ -239,12 +241,12 @@ async function main() {
   const panelHtml = await readFile(path.join(root, 'dist/panel/panel.html'), 'utf8');
   check('panel page loads its own stylesheet and script', panelHtml.includes('panel.css') && panelHtml.includes('panel.js'));
   check('panel page carries the shared component styles', panelHtml.includes('../static/base.css'));
-  for (const id of ['panel-tabs', 'engine-status', 'context-host', 'listing-host', 'browse-list-host', 'queue-host', 'servers-host', 'settings-host', 'dock-host']) {
+  for (const id of ['panel-tabs', 'engine-status', 'context-host', 'listing-host', 'browse-list-host', 'queue-host', 'links-host', 'servers-host', 'settings-host', 'dock-host']) {
     if (!panelHtml.includes(`id="${id}"`)) check(`panel page has #${id}`, false, 'missing element id');
   }
   check(
     'panel page declares every element the controller looks up',
-    ['panel-tabs', 'engine-status', 'context-host', 'listing-host', 'browse-list-host', 'queue-host', 'servers-host', 'settings-host', 'dock-host'].every((id) =>
+    ['panel-tabs', 'engine-status', 'context-host', 'listing-host', 'browse-list-host', 'queue-host', 'links-host', 'servers-host', 'settings-host', 'dock-host'].every((id) =>
       panelHtml.includes(`id="${id}"`),
     ),
   );
@@ -257,6 +259,7 @@ async function main() {
 
   const platform = await import(path.join(root, 'dist/platform/index.js'));
   const send = (request) => platform.getPlatform().send(request);
+  previewSend = send;
   const expectOk = async (request) => {
     const response = await send(request);
     if (!response.ok) throw new Error(`expected ok for ${request.type}, got ${JSON.stringify(response.error)}`);
@@ -391,7 +394,7 @@ async function bootPanel(registry, servers, postId) {
   const rendered = await waitFor(() => registry.get('panel-tabs')?.children.length > 0, 3000);
   check('panel renders its tab strip', rendered, 'no tabs were drawn');
   const tabs = registry.get('panel-tabs');
-  check('panel tab strip has all four sections', tabs?.children.length === 4, `got ${tabs?.children.length}`);
+  check('panel tab strip has all five sections', tabs?.children.length === 5, `got ${tabs?.children.length}`);
   check(
     'panel showing the first tab label',
     tabs?.children[0]?.textContent?.includes('Browse') || tabs?.children[0]?.children?.some((child) => String(child.textContent).includes('Browse')),
@@ -466,6 +469,7 @@ async function walkTabs(registry) {
   const panes = {
     Browse: 'pane-browse',
     Queue: 'pane-queue',
+    Links: 'pane-links',
     Servers: 'pane-servers',
     Settings: 'pane-settings',
   };
@@ -474,7 +478,13 @@ async function walkTabs(registry) {
     const paneId = panes[label];
     if (!paneId) continue;
     button.fire('click');
-    const host = { 'pane-browse': 'browse-list-host', 'pane-queue': 'queue-host', 'pane-servers': 'servers-host', 'pane-settings': 'settings-host' }[paneId];
+    const host = {
+      'pane-browse': 'browse-list-host',
+      'pane-queue': 'queue-host',
+      'pane-links': 'links-host',
+      'pane-servers': 'servers-host',
+      'pane-settings': 'settings-host',
+    }[paneId];
     const rendered = await waitFor(() => (registry.get(host)?.children.length ?? 0) > 0, 4000);
     check(`panel ${label} tab renders its pane`, rendered, `${host} stayed empty`);
     if (paneId === 'pane-settings') {
@@ -486,10 +496,93 @@ async function walkTabs(registry) {
       const servers = collectText(registry.get('servers-host') ?? createElement());
       check('servers pane lists the saved profiles', servers.includes('e621'), servers.slice(0, 160));
     }
+    if (paneId === 'pane-links') {
+      const links = collectText(registry.get('links-host') ?? createElement());
+      check('links pane renders the mirror-link card', /mirror links/i.test(links), links.slice(0, 200));
+      check('links pane offers import and export', /export \.txt/i.test(links) && /import \.txt/i.test(links), links.slice(0, 240));
+      check('links pane counts the collected links', /collected/i.test(links), links.slice(0, 200));
+    }
   }
   // Leave the panel on Browse for the dock assertions, then drive a search.
   tabs[0]?.fire('click');
   await driveListing(registry);
+  await driveLinks(registry);
+}
+
+/**
+ * Drive the Links tab through the built panel bundle: collect a few of the demo
+ * creator's mirror links, stop the crawl, then read the list back out through
+ * the protocol - the one flow a unit test cannot prove is wired in the bundle.
+ */
+async function driveLinks(registry) {
+  const linksTab = (registry.get('panel-tabs')?.children ?? []).find((button) => /links/i.test(collectText(button)));
+  if (!linksTab) {
+    check('panel has a Links tab to drive', false, 'no tab labelled Links');
+    return;
+  }
+  linksTab.fire('click');
+  await waitFor(() => (registry.get('links-host')?.children.length ?? 0) > 0, 4000);
+
+  const card = () => registry.get('links-host') ?? createElement();
+  const input = card().find((node) => node.tagName === 'INPUT' && node.id === 'psLinksQuery');
+  if (!input) {
+    check('links card offers a creator query box', false, 'no #psLinksQuery input');
+    return;
+  }
+  input.value = 'fanbox/1245946';
+  input.fire('input', { type: 'input', target: input });
+
+  const collect = card().find((node) => node.tagName === 'BUTTON' && /Collect links/i.test(node.textContent ?? ''));
+  if (!collect) {
+    check('links card offers a Collect button', false, 'no button labelled Collect links');
+    return;
+  }
+  collect.fire('click');
+
+  // The crawl is rate limited (1.5 s per request for a creator archive), so one
+  // listing + one scanned post is what this waits for - then Stop is pressed and
+  // what was found has to survive.
+  // Real rows only: the header copy mentions the provider names, and a re-render
+  // replaces the elements, so the predicate looks at the ticked-row count.
+  const collected = () => {
+    const text = collectText(card());
+    const match = /Add to download queue \((\d+)\)/i.exec(text);
+    return match ? Number(match[1]) : 0;
+  };
+  const found = await waitFor(() => collected() > 0, 20000);
+  check('links tab collects the demo creator\'s mirror links', found, collectText(card()).slice(0, 240));
+  check(
+    "links tab leaves the site's own storage alone",
+    !/https:\/\/n\d\.pawchive\.pw/i.test(collectText(card())),
+    collectText(card()).slice(0, 240),
+  );
+  check('links tab offers to queue what it found', collected() > 0, collectText(card()).slice(0, 240));
+
+  const stop = card().find((node) => node.tagName === 'BUTTON' && (node.textContent ?? '').trim() === 'Stop');
+  stop?.fire('click');
+  const stopped = await waitFor(
+    () => (card().find((node) => node.tagName === 'BUTTON' && /Collect links/i.test(node.textContent ?? '')) ?? null) !== null,
+    8000,
+  );
+  check('links tab stops a crawl on demand', stopped, collectText(card()).slice(0, 240));
+
+  const rows = await previewSend?.({ type: 'links/list' });
+  check('the collected links are in durable storage', rows?.ok === true && rows.data.links.length > 0, JSON.stringify(rows?.ok ? rows.data.stats : rows?.error));
+
+  const exported = await previewSend?.({ type: 'links/export', payload: { grouping: 'post' } });
+  check(
+    'the collected list exports as a re-importable file',
+    exported?.ok === true && exported.data.count > 0 && exported.data.text.includes('# Post:') && exported.data.filename.endsWith('.txt'),
+    JSON.stringify(exported?.ok ? { count: exported.data.count, filename: exported.data.filename } : exported?.error),
+  );
+
+  // Put the panel back on Browse, so the dock checks that follow still apply.
+  tabs0(registry)?.fire('click');
+}
+
+/** The first tab button (Browse), used to leave the panel where the dock expects it. */
+function tabs0(registry) {
+  return registry.get('panel-tabs')?.children?.[0] ?? null;
 }
 
 /** Type a query into the fetch card and press *List this page*. */

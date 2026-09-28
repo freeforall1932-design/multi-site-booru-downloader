@@ -10,7 +10,14 @@
  * for real.
  */
 import type { FetchLike } from '../shared/http.js';
-import { credentialsLookValid, MOCK_POSTS, mockMediaPath, type MockPostSeed } from './mock-data.js';
+import {
+  credentialsLookValid,
+  MOCK_CREATOR_POSTS,
+  MOCK_POSTS,
+  mockMediaPath,
+  type MockCreatorPost,
+  type MockPostSeed,
+} from './mock-data.js';
 
 export interface MockBooruOptions {
   /** Simulated latency in ms (0 in tests). */
@@ -21,7 +28,7 @@ export interface MockBooruOptions {
 
 interface RequestContext {
   url: URL;
-  site: 'e621' | 'danbooru' | 'gelbooru';
+  site: 'e621' | 'danbooru' | 'gelbooru' | 'creator-archive';
   tags: string;
   limit: number;
   page: number;
@@ -62,7 +69,9 @@ function contextFor(url: URL, init?: RequestInit): RequestContext | null {
     ? 'gelbooru'
     : host.includes('danbooru') || host.includes('donmai')
       ? 'danbooru'
-      : 'e621';
+      : host.includes('pawchive') || host.includes('kemono') || host.includes('coomer')
+        ? 'creator-archive'
+        : 'e621';
   const tags = url.searchParams.get('tags') ?? '';
   const limit = Number(url.searchParams.get('limit') ?? (site === 'gelbooru' ? 100 : 50));
   const page = Number(site === 'gelbooru' ? url.searchParams.get('pid') ?? 0 : url.searchParams.get('page') ?? 1);
@@ -207,7 +216,31 @@ function gelbooruPost(seed: MockPostSeed, mediaBase: string) {
   };
 }
 
-/** Build a `fetch` implementation that answers the three booru APIs offline. */
+/**
+ * Creator-archive payloads (Kemono / Coomer / Pawchive).
+ *
+ * The listing returns one entry per post - the adapter expands the attachments
+ * into rows itself - and the single-post route returns the newer
+ * `{post, attachments}` envelope the live API uses.
+ */
+function creatorArchivePost(post: MockCreatorPost, mediaBase: string) {
+  const files = post.files.map((file) => ({ ...file, preview_only: false }));
+  return {
+    id: post.id,
+    service: post.service,
+    user: post.user,
+    title: post.title,
+    published: post.published,
+    content: post.content,
+    file: files[0] ?? null,
+    attachments: files.slice(1),
+    tags: ['mock_creator', post.service],
+    // The site's own host, which is what the real API returns for attachments.
+    ...(mediaBase ? { server: 'pawchive' } : {}),
+  };
+}
+
+/** Build a `fetch` implementation that answers the booru and archive APIs offline. */
 export function createMockBooruFetch(options: MockBooruOptions = {}): FetchLike {
   const latencyMs = options.latencyMs ?? 90;
   const mediaBase = options.mediaBase ?? '';
@@ -221,7 +254,10 @@ export function createMockBooruFetch(options: MockBooruOptions = {}): FetchLike 
     const url = new URL(input, 'https://preview.local');
     const ctx = contextFor(url, init);
     if (!ctx) return json({ error: 'unsupported host' }, 400);
-    if (!['e621.net', 'e926.net', 'danbooru.donmai.us', 'gelbooru.com', 'www.gelbooru.com'].includes(url.host)) {
+    if (
+      !['e621.net', 'e926.net', 'danbooru.donmai.us', 'gelbooru.com', 'www.gelbooru.com'].includes(url.host) &&
+      !/^(?:www\.)?(?:pawchive\.pw|pawchive\.st|kemono\.cr|kemono\.su|kemono\.party|coomer\.st|coomer\.su|coomer\.party)$/.test(url.host)
+    ) {
       return json({ error: `mock backend does not know host ${url.host}` }, 404);
     }
 
@@ -230,10 +266,54 @@ export function createMockBooruFetch(options: MockBooruOptions = {}): FetchLike 
     if (forced) return respond(() => json({ error: 'forced failure' }, forced));
 
     // Real sites reject a supplied-but-invalid credential pair on every route,
-    // so the mock does too (this is what makes 401 paths testable).
+    // so the mock does too (this is what makes 401 paths testable). Creator
+    // archives are anonymous - nothing is checked there.
     const supplied = !!(ctx.apiKey || ctx.username || ctx.userId || ctx.authHeader);
-    if (supplied && !credentialsLookValid(ctx.site, { username: ctx.username, apiKey: ctx.apiKey, userId: ctx.userId })) {
+    if (
+      ctx.site !== 'creator-archive' &&
+      supplied &&
+      !credentialsLookValid(ctx.site, { username: ctx.username, apiKey: ctx.apiKey, userId: ctx.userId })
+    ) {
       return respond(() => json({ error: 'unauthorized' }, 401));
+    }
+
+    // --------------------------------------------------- creator archives API
+    if (ctx.site === 'creator-archive') {
+      const segments = ctx.url.pathname.split('/').filter(Boolean);
+      const offset = Number(ctx.url.searchParams.get('o') ?? 0) || 0;
+
+      // Validation probe: `/api/v1/posts?o=0`.
+      if (segments[0] === 'api' && segments[1] === 'v1' && segments[2] === 'posts') {
+        const q = (ctx.url.searchParams.get('q') ?? '').toLowerCase();
+        const tag = (ctx.url.searchParams.get('tag') ?? '').toLowerCase();
+        const filtered = MOCK_CREATOR_POSTS.filter((post) => {
+          const tags = ['mock_creator', post.service];
+          if (tag) return tags.some((entry) => entry.includes(tag));
+          if (q) return post.title.toLowerCase().includes(q);
+          return true;
+        });
+        const slice = filtered.slice(offset, offset + 50);
+        return respond(() => json({ count: filtered.length, posts: slice.map((post) => creatorArchivePost(post, mediaBase)) }));
+      }
+
+      // Creator listing: `/api/v1/{service}/user/{user}/posts?o=0`.
+      if (segments[0] === 'api' && segments[1] === 'v1' && segments[3] === 'user' && segments[5] === 'posts') {
+        const service = segments[2]!;
+        const user = segments[4]!;
+        const filtered = MOCK_CREATOR_POSTS.filter((post) => post.service === service && post.user === user);
+        const slice = filtered.slice(offset, offset + 50);
+        return respond(() => json({ count: filtered.length, posts: slice.map((post) => creatorArchivePost(post, mediaBase)) }));
+      }
+
+      // Single post: `/api/v1/{service}/user/{user}/post/{id}`.
+      if (segments[0] === 'api' && segments[1] === 'v1' && segments[3] === 'user' && segments[5] === 'post') {
+        const post = MOCK_CREATOR_POSTS.find((entry) => entry.id === segments[6]);
+        if (!post) return respond(() => json({ error: 'not found' }, 404));
+        const built = creatorArchivePost(post, mediaBase);
+        return respond(() => json({ post: { ...built, file: undefined }, attachments: post.files.map((file) => ({ ...file, preview_only: false })) }));
+      }
+
+      return respond(() => json({ error: `unknown creator-archive route ${ctx.url.pathname}` }, 404));
     }
 
     // ------------------------------------------------------------- e621 API

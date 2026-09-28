@@ -14,6 +14,7 @@ import { BooruClient } from '../core/client.js';
 import { ChromeDownloader } from '../core/downloads.js';
 import type { UiRequest } from '../core/messages.js';
 import { DownloadHistoryStore, SearchHistoryStore } from '../core/history.js';
+import { MirrorLinkStore } from '../core/link-store.js';
 import { DownloadQueue } from '../core/queue.js';
 import { createRouter } from '../core/router.js';
 import { ServerStore } from '../core/servers.js';
@@ -37,7 +38,8 @@ const client = new BooruClient({ servers, settings, http, validation });
 const downloader = new ChromeDownloader();
 const history = new DownloadHistoryStore(area);
 const searches = new SearchHistoryStore(area);
-const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history });
+const links = new MirrorLinkStore(area);
+const queue = new DownloadQueue({ storage: area, client, servers, settings, downloader, history, links });
 
 const handle = createRouter({
   client,
@@ -49,6 +51,7 @@ const handle = createRouter({
   storage: area,
   history,
   searches,
+  links,
   environment: 'extension',
   version: VERSION,
 });

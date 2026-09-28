@@ -23,6 +23,10 @@ function openPanelAs(url, hash) {
 
 document.getElementById('open-panel')?.addEventListener('click', () => openPanelAs('https://e621.net/posts/1500000'));
 document.getElementById('open-panel-queue')?.addEventListener('click', () => openPanelAs('https://e621.net/posts?tags=cat', '#queue'));
+// A creator page: the Links tab picks up the profile and the creator from it.
+document.getElementById('open-panel-links')?.addEventListener('click', () =>
+  openPanelAs('https://pawchive.pw/fanbox/user/1245946', '#links'),
+);
 
 document.getElementById('open-options')?.addEventListener('click', () => {
   window.open('../../dist/options/options.html', '_blank', 'noopener');

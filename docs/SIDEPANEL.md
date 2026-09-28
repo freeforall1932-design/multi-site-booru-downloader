@@ -21,9 +21,9 @@ one dock, one list, one settings screen — while staying a *booru* tool:
 │ BOORU SERVER MANAGER                        3 downloading │  header + status pill
 │ Download panel                                            │
 ├───────────────────────────────────────────────────────────┤
-│  Browse │ Queue ③ │ Servers │ Settings                    │  tab strip (deep links:
-├───────────────────────────────────────────────────────────┤  #browse #queue #servers
-│ ●  e621 post #1500000 — default profile             [Use…]│  #settings)
+│  Browse │ Queue ③ │ Links │ Servers │ Settings            │  tab strip (deep links:
+├───────────────────────────────────────────────────────────┤  #browse #queue #links
+│ ●  e621 post #1500000 — default profile             [Use…]│  #servers #settings)
 │ [thumb] #1500000 safe  [video]                            │  "this post" card
 │         [Download this post] [Add to list]                │
 ├───────────────────────────────────────────────────────────┤
@@ -56,6 +56,7 @@ one dock, one list, one settings screen — while staying a *booru* tool:
 | **Browse** | Active-tab card, "this post" card, fetch card, the list of rows | `routes/detect`, `posts/get`, `browse/search`, `queue/enqueuePosts`, `history/list` |
 | **Queue** | The same rows, focused on progress: retry failed, clear finished, reset history, clear list | `queue/list`, `queue/retryFailed`, `queue/clear`, `history/clear` |
 |  | Rows carry the media badge (`pic`/`video`), the canonical **rating chip**, the profile's site type and a `saved` badge | `queue/list` (rating is stored on the row at enqueue time) |
+| **Links** | The mirror-link collector: pick a creator-archive profile, type the creator, collect the off-site download links from every post, group/tick/queue them, export or import the list as `.txt` | `links/list`, `links/posts`, `links/scanPost`, `links/queue`, `links/remove`, `links/clear`, `links/export`, `links/import`, `queue/enqueueLinks` |
 | **Servers** | Full server manager (list, add/edit/validate, duplicate, delete, set default) plus diagnostics | `servers/*`, `diagnostics/info`, `userAgent/sync` |
 | **Settings** | The sectioned settings screen (identical to the options page's) | `settings/get`, `settings/save`, `servers/export|import`, `history/*`, `searches/*` |
 
@@ -86,6 +87,12 @@ queue/run { itemIds: [...] }  → only the ticked rows (the dock button)
 Newly listed rows arrive ticked; a row you untick stays unticked across refreshes
 (the selection is reconciled, not reset).
 
+A mirror link is a queue row too, with two deliberate differences: it is keyed by
+its **URL** (`link:<url>`) instead of `serverId:postId`, and it skips the adapter,
+the post lookup and the rating filter - the file is off-site, so there is nothing
+to look up. That is what lets an imported `.txt` download on a fresh profile with
+no server configured at all, and why the same URL can never be queued twice.
+
 ## Settings reference
 
 All of these live in `chrome.storage.local` and are shared by the panel, the
@@ -96,7 +103,7 @@ options page and the popup. Defaults in brackets.
 | Setting | What it does |
 | --- | --- |
 | **Toolbar click opens** [`sidepanel`] | `sidepanel` = docked panel (`openPanelOnActionClick`), `popup` = the classic popup page. The worker re-applies the stored choice every time it starts, so a `popup` profile keeps its popup. |
-| **Panel opens on** [`browse`] | Which tab the panel shows when it opens (`browse`, `queue`, `servers`, `settings`). |
+| **Panel opens on** [`browse`] | Which tab the panel shows when it opens (`browse`, `queue`, `links`, `servers`, `settings`). |
 | **Theme** [`system`] | Dark-first design; `light` exists for daytime reading. |
 
 ### 2. Multiple download
@@ -113,6 +120,14 @@ options page and the popup. Defaults in brackets.
 | Setting | What it does |
 | --- | --- |
 | **Quality** (`filePreference`) [`original`] | `original` downloads the file the site hosts; `sample` prefers the site's smaller sample rendition when it has one (`sampleUrl`), and silently falls back to the original when it does not. |
+
+### 2b. Mirror links
+
+| Setting | What it does |
+| --- | --- |
+| **Only download-looking links** [`downloads`] | What the collector keeps. `downloads` = known file hosts plus URLs that end in a file extension, look like a download (`/download/…`, `?file=…`) or carry a long hash; `any` = every external link, for posts that link somewhere unusual. Links on the site itself are never collected - those are ordinary post downloads. |
+| **Extra provider hosts** [`''`] | Which hosts count as providers, space or comma separated. A subdomain counts too (`mega.nz` matches `www.mega.nz`). |
+| **Mirror folder template** [`mirrors/{host}`] | Where link rows are saved. Its tokens describe a URL, not a post: `{host}`, `{provider}`, `{siteType}`, `{filename}`, `{ext}`, `{date}`. |
 
 ### 4. List results
 
@@ -164,6 +179,84 @@ options page and the popup. Defaults in brackets.
 Export (with or without keys), import, "delete all keys", the download-history
 counter with **Reset download history**, **Clear search history** and **Reset
 every setting** (servers and keys are never touched by a reset).
+
+## Links tab (mirror links)
+
+Creator archives (Kemono, Coomer, Pawchive) are the family where the real file is
+usually *not* on the site: the post body says "the pack is on Mega" and links
+there. Those URLs are not booru posts, so the ordinary listing cannot see them -
+the Links tab is built for exactly that gap.
+
+```
+Links
+[ Profile: Pawchive (demo creator) ▾ ]   archive API
+[ fanbox/1245946                                    ]
+[ Collect links ]  [ Stop ]
+▓▓▓▓▓▓▓░░░░  Scanned 41/58 · 63 found · 12 already known
+  96 collected   61 to download   35 downloaded   3 failed
+☑ Select all   Invert   Remove selected (12)
+[ Add to download queue (12) ]  [ Export .txt ]  [ Import .txt… ]
+Export as [ Grouped by post ▾ ]        filter: downloads only
+─ Post: September art pack (v2) — …/post/12674481     3 link(s)
+  ☑ [Mega] September art pack (v2)   https://mega.nz/file/…
+  ☑ [Google Drive] …                 https://drive.google.com/file/d/…
+─ Post: Sketch dump — week 35                2 link(s)
+  …
+```
+
+**Collecting.** Pick a profile whose site type is a creator archive, type a
+creator (`service/creatorId`, or paste the creator page's URL - `tag:name` and
+plain text work too), then press *Collect links*. The panel asks the worker for
+one listing page (`links/posts`) and then walks the posts one at a time
+(`links/scanPost`), showing progress as it goes; *Stop* finishes the post in
+flight and keeps everything found so far. Every URL found in a post body
+(`content` HTML, attachments, `source` fields - the scan is payload-wide, not
+site-specific) is tested against the rules above and stored in `bsm.links`.
+Collecting the same creator again is safe: a URL is merged by id, so a re-scan
+never duplicates a row and never hides a file you already downloaded.
+
+**Queuing.** Ticked rows go to the queue with *Add to download queue* - one `link`
+row per URL, downloaded with the same concurrency and spacing as every other row.
+Hosting pages that need a login or run a script (Drive folders, Mega landing
+pages) fail honestly: the row keeps the error and the exported file stays the
+reliable path for those.
+
+**Exchanging the list.** *Export .txt* writes the whole collected list - grouped
+by post (default), grouped by provider, or as a plain URL list - to
+`<creator>_download_links.txt`:
+
+```
+# Booru Server Manager — collected mirror links
+# Creator: fanbox/1245946
+# Server: Pawchive (demo creator) (https://pawchive.pw)
+# Exported: 2026-09-29T10:00:00.000Z
+# Total: 6 link(s), grouped by post
+#
+# One URL per line. Feed this file back in with "Import .txt" to rebuild the list.
+
+# Post: September art pack (v2) — https://pawchive.pw/fanbox/user/1245946/post/12674481
+- https://mega.nz/file/AbCdEf12#9hIjKlMnOpQrStUvWxYz0123456789
+- https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view?usp=sharing
+```
+
+*Import .txt…* opens a file picker and reads the same shape back - its own
+export, a hand-written list or one the
+[Pawchive Link Collector userscript](../userscripts/README.md) wrote (its
+`Creator:`/`Collected:` preamble is ignored, bullets are stripped, `#` lines are
+comments). Imported URLs are added with no provider filter and no own-host rule -
+a file you hand over *is* the instruction - and the post title from each section
+header is kept, so the imported rows still group by post. Use the `queue: true`
+path (the panel's *Import .txt…* and *Add to download queue*) to go straight from
+the file to downloads.
+
+**Storing.** `bsm.links` holds the list (`src/core/link-store.ts`, capped at
+20,000 rows). Like the queue, it is a real `chrome.storage.local` list: closing
+the panel, reloading the page or restarting the worker keeps it, and a row
+remembers its download outcome (`new` → `queued` → `done`/`failed`, the saved
+filename and the error) so re-importing the same file does not re-download what
+you already have. *Clear downloaded* and *Clear list* are the two ways to trim it;
+removing a link also drops its pending queue rows (a running download is never
+killed).
 
 ## History notebooks
 

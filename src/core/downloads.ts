@@ -25,11 +25,18 @@ export interface Downloader {
 /** Records downloads instead of touching the filesystem (tests + browser preview). */
 export class RecordingDownloader implements Downloader {
   readonly log: Array<{ url: string; filename: string; at: string }> = [];
+  /** When set, the next `download()` call throws it and the field resets. */
+  failNext: Error | null = null;
   private nextId = 1;
 
   async download(request: DownloadRequest): Promise<DownloadOutcome> {
     if (!safeUrl(request.url)) {
       throw new BooruError(`Not a valid download URL: ${request.url}`, { kind: 'parse-failure' });
+    }
+    const failure = this.failNext;
+    if (failure) {
+      this.failNext = null;
+      throw failure;
     }
     this.log.push({ url: request.url, filename: request.filename, at: new Date().toISOString() });
     return { downloadId: this.nextId++, viaFallback: false, bytes: null };
@@ -37,6 +44,7 @@ export class RecordingDownloader implements Downloader {
 
   reset(): void {
     this.log.length = 0;
+    this.failNext = null;
     this.nextId = 1;
   }
 }

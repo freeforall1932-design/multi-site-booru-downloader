@@ -23,6 +23,8 @@ export const STORAGE_KEYS = {
   history: 'bsm.history',
   /** Remembered searches per server (side-panel search box). */
   searches: 'bsm.searches',
+  /** Collected mirror links (Links tab): URLs, their post, their download state. */
+  links: 'bsm.links',
 } as const;
 
 /** Bump when a migration is needed; `migrateStorage` is the single place to react. */

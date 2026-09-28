@@ -85,3 +85,104 @@ export function credentialsLookValid(siteType: 'e621' | 'danbooru' | 'gelbooru',
   if ('userId' in expected) return provided.userId === expected.userId && apiKey === expected.apiKey;
   return false;
 }
+
+/**
+ * Creator archive (Kemono / Coomer / Pawchive) fixture.
+ *
+ * The mirror links live in the post `content` HTML, exactly like the real sites:
+ * every downloadable file is on somebody else's host, listed only as a URL. One
+ * post deliberately links the site's own storage node (`n1.pawchive.pw`) and one
+ * links a plain gallery page, so both edges of the link filter are demoable:
+ * the first is never collected (it is a normal attachment), the second only with
+ * the "every external link" filter.
+ */
+export interface MockCreatorPost {
+  id: string;
+  service: string;
+  user: string;
+  title: string;
+  published: string;
+  content: string;
+  /** Primary file, plus attachments - the shape `/api/v1/…/post/{id}` returns. */
+  files: Array<{ name: string; path: string; node: number | null }>;
+}
+
+export const MOCK_CREATOR = { service: 'fanbox', user: '1245946', name: 'Mock Creator' } as const;
+
+const MEGA = 'https://mega.nz/file/AbCdEf12#9hIjKlMnOpQrStUvWxYz0123456789';
+const DRIVE = 'https://drive.google.com/file/d/1AbCdEfGhIjKlMnOpQrStUvWxYz/view?usp=sharing';
+const PIXELDRAIN = 'https://pixeldrain.com/u/abcd1234';
+const MEDIAFIRE = 'https://www.mediafire.com/file/xyz789/artpack.zip/file';
+const CATBOX = 'https://catbox.moe/8f3a2b1c.psd';
+const DROPBOX = 'https://www.dropbox.com/s/abcdef123456/sketchbook.cbz?dl=0';
+const OWN_NODE = 'https://n1.pawchive.pw/data/d0/fe/d0fedede6a3c6d0214a20644274bd342f10893ce29c8b91387d815cca162e1aa.zip';
+const GALLERY = 'https://example.com/gallery/1234';
+
+export const MOCK_CREATOR_POSTS: MockCreatorPost[] = [
+  {
+    id: '12674481',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'September art pack (v2)',
+    published: '2026-09-02T10:00:00',
+    content: `<p>Thanks for the support! Everything is in the archive:</p>
+      <p><a href="${MEGA}">MEGA</a> · <a href="${DRIVE}">Google Drive</a></p>
+      <p>Mirror: ${PIXELDRAIN}</p>
+      <p>Site copy: <a href="${OWN_NODE}">pawchive</a> · Gallery: <a href="${GALLERY}">gallery page</a></p>`,
+    files: [
+      { name: 'artpack-v2.zip', path: '/d0/fe/d0fedede6a3c6d0214a20644274bd342f10893ce29c8b91387d815cca162e1aa.zip', node: 2 },
+      { name: 'cover.jpeg', path: '/d0/fe/d0fedede6a3c6d0214a20644274bd342f10893ce29c8b91387d815cca162e1aa.jpeg', node: 2 },
+    ],
+  },
+  {
+    id: '12641102',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'Sketch dump — week 35',
+    published: '2026-08-30T09:12:00',
+    content: `<h2>Downloads</h2><ul><li><a href="${MEDIAFIRE}">MediaFire (pack)</a></li>
+      <li><a href="${PIXELDRAIN}">pixeldrain mirror</a></li></ul>
+      <p>PSD file: ${CATBOX}</p>`,
+    files: [{ name: 'sketches-35.zip', path: '/ab/cd/abcd00001111222233334444555566667777888899990000111122223333.zip', node: 1 }],
+  },
+  {
+    id: '12619230',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'Full colour pack + brushes',
+    published: '2026-08-24T18:45:00',
+    content: `<p>Brushes are on Dropbox this time, the pack is on Drive.</p>
+      <p><a href="${DROPBOX}">download</a> | <a href="${DRIVE}">pack</a></p>`,
+    files: [{ name: 'colours.zip', path: '/12/34/1234abcd5678ef9012345678abcd000011112222333344445555666677778888.zip', node: 3 }],
+  },
+  {
+    id: '12598347',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'Wallpaper batch (4K)',
+    published: '2026-08-19T08:00:00',
+    content: `<p><a href="${MEGA}">MEGA folder</a> — same pack as last time, re-uploaded.</p>
+      <p>Preview only: <a href="${GALLERY}">gallery</a></p>`,
+    files: [{ name: 'wallpapers.zip', path: '/56/78/5678abcd0000111122223333444455556666777788889999000011112222.zip', node: 1 }],
+  },
+  {
+    id: '12577311',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'Comic chapter 12',
+    published: '2026-08-12T21:30:00',
+    content: `<p>CBZ is on Dropbox, and the raw pages are on catbox.</p>
+      <p><a href="${DROPBOX}">CBZ</a></p><p><a href="${CATBOX}">raw PSD</a></p>`,
+    files: [{ name: 'chapter12.cbz', path: '/90/ab/90ab1234cdef5678901234567890abcd1234567890abcdef123456789012345.cbz', node: 2 }],
+  },
+  {
+    id: '12554890',
+    service: MOCK_CREATOR.service,
+    user: MOCK_CREATOR.user,
+    title: 'Timelapse + project files',
+    published: '2026-08-05T14:20:00',
+    content: `<p>Video is up on MediaFire, project files on Pixeldrain.</p>
+      <p><a href="${MEDIAFIRE}">MediaFire</a></p><p>${PIXELDRAIN}</p>`,
+    files: [{ name: 'timelapse.mp4', path: '/cd/ef/cdef1234567890abcdef1234567890abcdef1234567890abcdef123456789012.mp4', node: 3 }],
+  },
+];

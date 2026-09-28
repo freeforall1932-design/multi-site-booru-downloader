@@ -1,9 +1,12 @@
-import type { EnqueueCandidate, EnqueueInput } from './queue.js';
+import type { EnqueueCandidate, EnqueueInput, EnqueueLinkInput } from './queue.js';
 import type { SaveServerInput } from './servers.js';
+import type { LinkExportGrouping } from './links.js';
 import type {
   BooruPost,
   ExtensionSettings,
   FailureKind,
+  MirrorLink,
+  MirrorLinkStats,
   QueueItem,
   QueueSummary,
   Rating,
@@ -36,9 +39,18 @@ export type UiRequest =
   | { type: 'posts/resolveUrl'; payload: { url: string } }
   | { type: 'posts/download'; payload: { serverId?: string | null; postId?: string; url?: string } }
   | { type: 'routes/detect'; payload: { url: string } }
+  | { type: 'links/list' }
+  | { type: 'links/posts'; payload: { serverId: string; query: string; page: number } }
+  | { type: 'links/scanPost'; payload: { serverId: string; postId: string; postUrl?: string | null; postTitle?: string | null; creator?: string | null } }
+  | { type: 'links/queue'; payload: { ids: string[] } }
+  | { type: 'links/remove'; payload: { ids: string[] } }
+  | { type: 'links/clear'; payload: { scope?: 'all' | 'done' | 'pending' } }
+  | { type: 'links/export'; payload: { grouping?: LinkExportGrouping } }
+  | { type: 'links/import'; payload: { text: string; queue?: boolean; serverId?: string | null } }
   | { type: 'queue/list' }
   | { type: 'queue/enqueue'; payload: { items: EnqueueInput[] } }
   | { type: 'queue/enqueuePosts'; payload: { serverId: string; posts: EnqueueCandidate[] } }
+  | { type: 'queue/enqueueLinks'; payload: { links: EnqueueLinkInput[]; serverId?: string | null } }
   | { type: 'queue/run'; payload?: { itemIds?: string[] } }
   | { type: 'queue/pause' }
   | { type: 'queue/resume' }
@@ -84,9 +96,18 @@ export interface ResponseMap {
   'posts/resolveUrl': { post: BooruPost; server: ServerConfigView; route: RouteMatch };
   'posts/download': { filename: string; post: BooruPost; viaFallback: boolean; downloadId: number | null };
   'routes/detect': (RouteMatch & { server: ServerConfigView | null }) | null;
+  'links/list': { links: MirrorLink[]; stats: MirrorLinkStats };
+  'links/posts': { posts: Array<{ id: string; label: string; postUrl: string }>; hasMore: boolean; totalCount: number | null; page: number };
+  'links/scanPost': { added: MirrorLink[]; duplicates: number; total: number };
+  'links/queue': { queued: number; skipped: number; invalid: number; links: MirrorLink[]; stats: MirrorLinkStats };
+  'links/remove': { removed: number; links: MirrorLink[]; stats: MirrorLinkStats };
+  'links/clear': { removed: number; links: MirrorLink[]; stats: MirrorLinkStats };
+  'links/export': { text: string; filename: string; count: number; grouping: LinkExportGrouping };
+  'links/import': { parsed: number; added: number; updated: number; queued: number; invalid: number; links: MirrorLink[]; stats: MirrorLinkStats };
   'queue/list': { summary: QueueSummary; items: QueueItem[]; maxConcurrency: number };
   'queue/enqueue': { added: number; skipped: number; summary: QueueSummary };
   'queue/enqueuePosts': { added: number; skipped: number; summary: QueueSummary };
+  'queue/enqueueLinks': { added: number; skipped: number; invalid: number; summary: QueueSummary };
   'queue/run': { started: boolean; summary: QueueSummary };
   'queue/pause': { summary: QueueSummary };
   'queue/resume': { started: boolean; summary: QueueSummary };

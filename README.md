@@ -18,7 +18,7 @@ you configure.
 ┌───────────────────────────────────────────────────────────────────┐
 │  BOORU SERVER MANAGER                          3 downloading      │
 │  Download panel                                                   │
-│  Browse │ Queue ③ │ Servers │ Settings                            │
+│  Browse │ Queue ③ │ Links │ Servers │ Settings                     │
 │  ● e621 post #1500000 — default profile                    ⟳      │
 │  [thumb] #1500000 safe [video]                                    │
 │          [Download this post] [Add to list]                       │
@@ -49,11 +49,16 @@ The design and every setting are documented in
 - **Queue** — the row list with live status, per-row cancel/remove, retry failed,
   clear finished, reset history, clear list, and a fixed dock with a concurrency
   segmented control, an original/sample quality select and *Download selected*.
+- **Links** — the mirror-link collector: walks a creator's posts through a
+  creator-archive API (Kemono / Coomer / Pawchive), keeps every off-site download
+  link it finds (Drive, Mega, MediaFire, …) in a durable list, groups them by post
+  or provider, queues the ticked ones, and exports/imports the whole list as a
+  `.txt` that round-trips.
 - **Servers** — the full multi-account manager plus diagnostics in one scroll.
 - **Settings** — sectioned settings (global behaviour, download behaviour, list
   results, search behaviour, name template, interface, advanced behaviour,
   credentials, history) with a live file-name preview.
-- Deep links (`#browse`, `#queue`, `#servers`, `#settings`) and a `uiMode` switch
+- Deep links (`#browse`, `#queue`, `#links`, `#servers`, `#settings`) and a `uiMode` switch
   that puts the classic popup back on the toolbar if you prefer it.
 
 **Server manager (first-class screen)**
@@ -87,15 +92,24 @@ The design and every setting are documented in
   protection and length caps.
 - **Download history** — successful downloads are remembered per server, so
   re-running a search only lists what you do not have yet; reset it any time.
+- **Mirror links** — a second kind of queue row, for files that live off-site.
+  Link rows download the URL directly (no adapter, no post lookup, no rating), so
+  a `.txt` exported on one machine can be imported on a fresh profile and queued
+  with no server configured at all. They respect the same slow concurrency and
+  request spacing as every other row, and a URL is never queued twice.
 
 **Quality**
 
 - One shared adapter contract; the UI never branches on site type.
-- 270 automated tests (adapters, shared services, message router, HTTP layer, the
-  panel's page/query/template/history logic) and a strict TypeScript build.
+- 455 automated tests (adapters, shared services, message router, HTTP layer, the
+  mirror-link rules and export/import round-trip, the panel's
+  page/query/template/history logic) and a strict TypeScript build.
 - An offline **browser preview harness** (`npm run preview`) that runs the real
-  UI - side panel included - against mock booru APIs, so the extension can be
-  demoed without installing it and without any live requests.
+  UI - side panel included - against mock booru APIs, including a demo creator
+  whose posts carry mirror links, so the whole Links flow can be tried without
+  installing the extension and without any live requests.
+- The original **userscript** this feature grew out of is kept in
+  [`userscripts/`](userscripts/) for people who want the standalone version.
 
 ## Supported sites
 
@@ -160,6 +174,12 @@ rating filter is spelled `-explicit` etc.
 | `kemono` | kemono.cr (kemono.su / .party) | none | Type `service/creatorId` or paste a creator URL to list a creator, `tag:name` for a tag, anything else is a title search. Every attachment becomes one row (`service/creator/post/index`). No ratings. |
 | `coomer` | coomer.st (coomer.su / .party) | none | Same API |
 | `pawchive` | pawchive.pw (formerly pawchive.st) — the community's Kemono successor | none | Same API; files served from `n<node>.pawchive.pw`, thumbnails from `img.pawchive.pw`. Some files are preview-only or need a website login. |
+
+Creator archives are the one family whose *real* downloads are usually not on the
+site at all: a post body says "the pack is on Mega" and links there. Every
+Kemono-family profile therefore also works with the panel's **Links** tab, which
+collects those off-site links (see [docs/SIDEPANEL.md](docs/SIDEPANEL.md#links-tab-mirror-links)),
+keeps them in a durable list and can export or re-import them as `.txt`.
 
 **Deliberately not included** (checked against the Droidbooru reference client in
 `reference/`): IBSearch (site is gone), Shimmie 2 and ZeroChan (HTML scraping
@@ -263,7 +283,7 @@ uses `-explicit`; Hydrus and Kemono have no ratings and report the filter as uns
 | `npm run build` | Removes `dist/`, compiles `src/` with `tsc`, copies HTML/CSS/manifest, renders the 4 PNG icons, writes `dist/build-info.json` |
 | `npm run typecheck` | Strict type check of `src/` and of `src/` + `tests/` |
 | `npm test` | Vitest suite (270 tests) |
-| `npm run smoke` | Drives the **built** `dist/` bundle end-to-end against the mock booru (76 checks: manifest, service worker wiring, side-panel page, masking, validation kinds, browse, download naming, queue draining, history notebooks, selective runs, settings, diagnostics) and then boots the built **panel bundle** and the **options bundle** on a DOM mock, drives a real query through the panel and walks all four panel tabs |
+| `npm run smoke` | Drives the **built** `dist/` bundle end-to-end against the mock booru (86 checks: manifest, service worker wiring, side-panel page, masking, validation kinds, browse, download naming, queue draining, history notebooks, selective runs, settings, diagnostics) and then boots the built **panel bundle** and the **options bundle** on a DOM mock, drives a real query and a real mirror-link collection through the panel, and walks all five panel tabs |
 | `npm run test:watch` | Vitest in watch mode |
 | `npm run verify` | `typecheck` → `build` → `test` |
 | `npm run preview` | Builds, then serves the **offline preview harness** on <http://localhost:4173> |
@@ -287,11 +307,13 @@ src/
   shared/      domain types, error taxonomy, HTTP client + rate limiter, helpers
   core/        adapter contract + registry, storage, settings, servers, validation,
                client, queue, naming, downloads, history notebooks, page ranges,
-               search composition, template editor, User-Agent rules, router
+               search composition, template editor, User-Agent rules, router,
+               mirror-link rules + export/import, mirror-link store
   adapters/    e621, danbooru, gelbooru (+ factory for Gelbooru-family forks)
   platform/    Chrome MV3 platform, preview platform, lazy façade
   ui/          DOM helpers and view builders (server list, form, browse, queue,
-               settings sections, diagnostics, panel cards/lists/dock, toasts)
+               links collector, settings sections, diagnostics, panel
+               cards/lists/dock, toasts)
   panel/       side panel shell: layout, tab routing, controller, dock  ← primary
   options/     options page shell and routing (#servers/#editor/#browse/…)
   popup/       toolbar popup (current tab + quick search + queue footer)
@@ -303,6 +325,7 @@ tests/
   core/        servers, naming, validation, queue, HTTP/rate-limit, router tests
 scripts/       build, icon generator, preview server
 dev/preview/   preview harness page
+userscripts/   the standalone Pawchive Link Collector userscript + its README
 ```
 
 ## Documentation
@@ -315,11 +338,14 @@ dev/preview/   preview harness page
 | [docs/SECURITY.md](docs/SECURITY.md) | Credential storage, redaction rules, what never leaves the browser |
 | [docs/MANUAL_TESTS.md](docs/MANUAL_TESTS.md) | Step-by-step manual test plan with expected results |
 | [docs/WORKLIST.md](docs/WORKLIST.md) | Implemented scope, known gaps and next steps |
+| [userscripts/README.md](userscripts/README.md) | The standalone Pawchive Link Collector userscript (install, usage, Greasy Fork link) |
 
 ## Status
 
 Version 0.2.0 — e621, Danbooru and Gelbooru plus the Gelbooru-fork, Moebooru,
-Philomena, Hydrus and Kemono families are implemented against their APIs, the side panel is the primary surface, and an adapter conformance suite
+Philomena, Hydrus and Kemono families are implemented against their APIs, the side
+panel is the primary surface, the Links tab collects and re-imports off-site
+mirror links for creator archives, and an adapter conformance suite
 guards any new site. See [docs/WORKLIST.md](docs/WORKLIST.md) for what is done and
 what is deliberately left for later (e.g. per-site uploads, tag autocomplete,
 archive/PDF picture packing).
