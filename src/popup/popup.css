@@ -1,0 +1,142 @@
+body.popup {
+  width: 400px;
+  max-height: 600px;
+  overflow-y: auto;
+}
+
+.popup-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-elevated);
+  position: sticky;
+  top: 0;
+  z-index: 5;
+}
+
+.popup-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13.5px;
+}
+
+.popup-logo {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: linear-gradient(135deg, var(--accent), color-mix(in srgb, var(--accent) 40%, #b06cff));
+  color: var(--accent-text);
+  display: grid;
+  place-items: center;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+#popup-view {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.popup-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.popup-card h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.popup-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.popup-row + .popup-row {
+  margin-top: 8px;
+}
+
+.popup-post {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.popup-post img {
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  flex: none;
+}
+
+.popup-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.popup-grid figure {
+  margin: 0;
+  position: relative;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: var(--bg-input);
+}
+
+.popup-grid img {
+  width: 100%;
+  height: 84px;
+  object-fit: cover;
+  display: block;
+  cursor: pointer;
+}
+
+.popup-grid .popup-grid-actions {
+  display: flex;
+  gap: 2px;
+  padding: 4px;
+}
+
+.popup-grid .popup-grid-actions button {
+  padding: 2px 6px;
+  font-size: 11px;
+  flex: 1;
+}
+
+.popup-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.server-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.popup-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 18px 8px;
+}

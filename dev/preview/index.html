@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" data-theme="system">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Booru Server Manager · preview harness</title>
+    <link rel="stylesheet" href="/dist/static/base.css" />
+    <style>
+      body {
+        padding: 22px 26px 60px;
+      }
+
+      .wrap {
+        max-width: 1240px;
+        margin: 0 auto;
+      }
+
+      header.hero {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 20px;
+        flex-wrap: wrap;
+        margin-bottom: 18px;
+      }
+
+      .panels {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+        gap: 14px;
+      }
+
+      .frame {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--bg-elevated);
+      }
+
+      .frame-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        font-size: 13px;
+      }
+
+      iframe {
+        width: 100%;
+        border: 0;
+        display: block;
+        background: var(--bg);
+      }
+
+      #options-frame {
+        height: 760px;
+      }
+
+      #popup-frame {
+        height: 560px;
+      }
+
+      ul.creds {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
+
+      code.inline {
+        background: var(--bg-input);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 1px 6px;
+        font-family: var(--mono);
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <div>
+          <h1>Booru Server Manager — preview harness</h1>
+          <p class="muted">
+            The real extension UI running against mock e621 / Danbooru / Gelbooru endpoints. Storage is
+            <code class="inline">localStorage</code>, downloads save mock SVG files, and no credentials leave this tab.
+          </p>
+        </div>
+        <div class="header-actions">
+          <button type="button" class="btn" id="open-options">Open options page</button>
+          <button type="button" class="btn" id="open-popup">Open popup</button>
+          <button type="button" class="btn btn-danger" id="reset">Reset preview data</button>
+        </div>
+      </header>
+
+      <div class="panels">
+        <section class="card">
+          <h2>Demo accounts (mock)</h2>
+          <p class="muted small">
+            Validation succeeds with these credentials and fails with anything else, so both paths are easy to see.
+          </p>
+          <ul class="creds small">
+            <li>e621: username <code class="inline">demo_e621</code> · key <code class="inline">e621-demo-key</code></li>
+            <li>Danbooru: username <code class="inline">demo_danbooru</code> · key <code class="inline">danbooru-demo-key</code></li>
+            <li>Gelbooru: user id <code class="inline">4242</code> · key <code class="inline">gelbooru-demo-key</code></li>
+          </ul>
+          <p class="muted small">Any key containing <code class="inline">demo</code> is also accepted, for quick edits.</p>
+        </section>
+
+        <section class="card">
+          <h2>Simulating failures</h2>
+          <p class="muted small">
+            Put a directive tag in a search box to exercise the shared failure taxonomy:
+          </p>
+          <ul class="creds small">
+            <li><code class="inline">force:401</code> → authentication failure</li>
+            <li><code class="inline">force:429</code> → rate limited / network category</li>
+            <li><code class="inline">force:html</code> → endpoint mismatch (HTML instead of JSON)</li>
+            <li><code class="inline">force:503</code> → server error with retry backoff</li>
+          </ul>
+          <p class="muted small">
+            Filters behave like the real sites: <code class="inline">-rating:explicit</code> exclusions are appended from the
+            per-server rating filter.
+          </p>
+        </section>
+      </div>
+
+      <div class="panels" style="margin-top: 14px">
+        <div class="frame">
+          <div class="frame-head">
+            <strong>Options page (server manager, browse, queue, settings, diagnostics)</strong>
+            <span class="muted small">server-list first</span>
+          </div>
+          <iframe id="options-frame" src="/dist/options/options.html" title="Options page preview"></iframe>
+        </div>
+
+        <div class="frame">
+          <div class="frame-head">
+            <strong>Popup &amp; content-script button</strong>
+            <span class="muted small">post-page flow</span>
+          </div>
+          <iframe
+            id="popup-frame"
+            src="/dist/popup/popup.html?tab=https%3A%2F%2Fe621.net%2Fposts%2F1500000"
+            title="Popup preview"
+          ></iframe>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/dev/preview/harness.js"></script>
+  </body>
+</html>

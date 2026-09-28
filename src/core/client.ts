@@ -1,0 +1,175 @@
+import { BooruError } from '../shared/errors.js';
+import type { HttpClient } from '../shared/http.js';
+import type {
+  BooruPost,
+  ExtensionSettings,
+  Rating,
+  RouteMatch,
+  SearchResult,
+  SearchSpec,
+  ServerConfig,
+} from '../shared/types.js';
+import { DEFAULT_SAFE_RATINGS } from '../shared/types.js';
+import { clamp, unique } from '../shared/util.js';
+import type { BooruAdapter } from './adapter.js';
+import { createAdapterContext, detectRoute, getAdapter, listAdapters, requireAdapter } from './registry.js';
+import type { ServerStore } from './servers.js';
+import type { SettingsStore } from './settings.js';
+import type { ValidationService } from './validation.js';
+
+export interface BooruClientDeps {
+  servers: ServerStore;
+  settings: SettingsStore;
+  http: HttpClient;
+  validation: ValidationService;
+}
+
+export interface ResolvedTarget {
+  server: ServerConfig;
+  adapter: BooruAdapter;
+}
+
+/**
+ * The single generic service the UI (and the download queue) talks to.
+ * Nothing above this layer knows which booru it is dealing with: site
+ * behaviour is reached exclusively through the adapter contract.
+ */
+export class BooruClient {
+  constructor(private readonly deps: BooruClientDeps) {}
+
+  get adapters(): BooruAdapter[] {
+    return listAdapters();
+  }
+
+  async listServers(): Promise<ServerConfig[]> {
+    return this.deps.servers.list();
+  }
+
+  async resolveServer(explicitId?: string | null): Promise<ServerConfig> {
+    if (explicitId) {
+      const server = await this.deps.servers.get(explicitId);
+      if (!server) throw new BooruError(`Unknown server "${explicitId}"`, { kind: 'unknown' });
+      return server;
+    }
+    const fallback = await this.deps.servers.getDefault();
+    if (!fallback) {
+      throw new BooruError('No server is configured yet', {
+        kind: 'incomplete-config',
+        hint: 'Add one in the server manager (Add server).',
+      });
+    }
+    return fallback;
+  }
+
+  async resolve(explicitId?: string | null): Promise<ResolvedTarget> {
+    const server = await this.resolveServer(explicitId);
+    return { server, adapter: requireAdapter(server.siteType) };
+  }
+
+  /** Does the route rating filter apply to this post? */
+  isRatingAllowed(server: ServerConfig, adapter: BooruAdapter, rating: Rating): boolean {
+    if (!server.ratingFilterEnabled) return true;
+    if (rating === 'unknown') return true;
+    const allowed = server.allowedRatings?.length ? server.allowedRatings : adapter.defaults.ratings;
+    return allowed.includes(rating);
+  }
+
+  /** Build the rating filter block for a search, honouring per-call overrides. */
+  ratingFilterFor(server: ServerConfig, adapter: BooruAdapter, override?: { enabled?: boolean; allowed?: Rating[] }) {
+    if (!adapter.capabilities.supportsRatingFilter) return { enabled: false, allowed: [] as Rating[] };
+    const enabled = override?.enabled ?? server.ratingFilterEnabled;
+    const allowed = unique(override?.allowed ?? server.allowedRatings ?? adapter.defaults.ratings ?? DEFAULT_SAFE_RATINGS);
+    return { enabled: enabled && allowed.length > 0, allowed };
+  }
+
+  async search(serverId: string | null, spec: SearchSpec): Promise<SearchResult> {
+    const { server, adapter } = await this.resolve(serverId);
+    const settings = await this.deps.settings.get();
+    const ctx = createAdapterContext(adapter, server, settings);
+    const limit = clamp(spec.limit ?? 50, 1, adapter.capabilities.maxPostsPerRequest);
+    const fullSpec: SearchSpec = {
+      ...spec,
+      limit,
+      ratingFilter: this.ratingFilterFor(server, adapter, spec.ratingFilter),
+    };
+    const request = adapter.buildSearchRequest(ctx, fullSpec);
+    const snapshot = await this.deps.http.request(request, {
+      rateKey: `server:${server.id}`,
+      minIntervalMs: Math.max(settings.minRequestIntervalMs, adapter.capabilities.minRequestIntervalMs),
+    });
+    return adapter.parseSearchResponse(snapshot, fullSpec, ctx);
+  }
+
+  async getPost(serverId: string | null, postId: string): Promise<BooruPost> {
+    const { server, adapter } = await this.resolve(serverId);
+    const settings = await this.deps.settings.get();
+    const ctx = createAdapterContext(adapter, server, settings);
+    const request = adapter.buildPostRequest(ctx, postId);
+    const snapshot = await this.deps.http.request(request, {
+      rateKey: `server:${server.id}`,
+      minIntervalMs: Math.max(settings.minRequestIntervalMs, adapter.capabilities.minRequestIntervalMs),
+    });
+    return adapter.parsePostResponse(snapshot, postId, ctx);
+  }
+
+  async validateServer(serverId: string): Promise<ReturnType<ValidationService['validate']>> {
+    const server = await this.resolveServer(serverId);
+    const settings = await this.deps.settings.get();
+    const result = await this.deps.validation.validate(server, settings);
+    await this.deps.servers.updateValidation(server.id, result);
+    return result;
+  }
+
+  /** Validate an unsaved draft (the add/edit form calls this before saving). */
+  async validateDraft(server: ServerConfig) {
+    const settings = await this.deps.settings.get();
+    return this.deps.validation.validate(server, settings);
+  }
+
+  /** URL → route, preferring a saved server that owns the host. */
+  async resolveRoute(url: string): Promise<(RouteMatch & { server: ServerConfig | null }) | null> {
+    const servers = await this.deps.servers.list();
+    const match = detectRoute(url, servers);
+    if (!match) return null;
+    const server = match.serverId ? servers.find((entry) => entry.id === match.serverId) ?? null : null;
+    return { ...match, server };
+  }
+
+  /** Resolve a post referenced by URL (used by the content script + popup). */
+  async resolvePostFromUrl(url: string): Promise<{ post: BooruPost; server: ServerConfig; route: RouteMatch }> {
+    const route = await this.resolveRoute(url);
+    if (!route || route.kind !== 'post' || !route.postId) {
+      throw new BooruError('This page is not a recognized booru post', {
+        kind: 'endpoint-mismatch',
+        hint: 'Open a post page on a saved server, or search by tags instead.',
+      });
+    }
+    const preferred = route.server ?? null;
+    const candidates = preferred ? [preferred] : (await this.deps.servers.list()).filter((server) => {
+      const adapter = getAdapter(server.siteType);
+      return !!adapter && adapter.matchesHost(new URL(url).host);
+    });
+    if (!candidates.length) {
+      throw new BooruError('No saved server matches this page', {
+        kind: 'incomplete-config',
+        hint: 'Add the site as a server first (Add server).',
+      });
+    }
+    let lastError: unknown = null;
+    for (const candidate of candidates) {
+      try {
+        const post = await this.getPost(candidate.id, route.postId);
+        return { post, server: candidate, route };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new BooruError('Could not load the post from any saved server', { kind: 'unknown' });
+  }
+
+  async getSettings(): Promise<ExtensionSettings> {
+    return this.deps.settings.get();
+  }
+}
